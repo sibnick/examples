@@ -12,14 +12,16 @@ import model
 
 class TrainBatchSource:
 
-    def __init__(self, bptt : int, source : torch.tensor):
+    def __init__(self, bptt : int, source : torch.tensor, start_epoch=1):
         self.bptt = bptt
         self.source = source
         self.batch_no = 0
         self.epoch_no = 0
         self.max = 0
+        self.start_epoch = start_epoch
         self.ds_len = train_data.size(0) - 1
         self.bs_len = train_data.size(1)
+        self.filters = torch.ones((bptt))[None, None, :].to(source.device)
         self.bs_idx = torch.zeros(self.bs_len, dtype=int).to(source.device)
         self.stat_cumsum_ones = torch.ones(self.ds_len, self.bs_len).to(source.device)
         self.stat_cumsum_ones = torch.cumsum(self.stat_cumsum_ones, 0)
@@ -27,14 +29,16 @@ class TrainBatchSource:
         self.stat_cumsum = self.stat_cumsum_ones
 
     def get_batch(self):
-        if self.epoch_no > 0 :
-            values = torch.rand(self.bs_len).to(self.source.device) * self.stat_cumsum[- 1, :]
-            seq_len = self.bptt #todo
+        if self.epoch_no >= self.start_epoch :
+            values = torch.rand(self.bs_len).to(self.source.device) * self.stat_cumsum[:, -1] # find max for each batch
+            values = values.contiguous()
+            seq_len = self.bptt
             data = torch.zeros(seq_len, self.bs_len, dtype=int).to(self.source.device)
             target = torch.zeros(seq_len, self.bs_len, dtype=int).to(self.source.device)
             count = 0
             for i in values:
-                idx = torch.searchsorted(self.stat_cumsum[:, count], i)
+                idx = torch.searchsorted(self.stat_cumsum[count, :], i) - self.bptt
+                idx = max(0, idx)
                 self.bs_idx[count] = idx
                 seq_len = min(self.bptt, len(self.source) - 1 - idx)
                 data[0:seq_len, count] = self.source[idx : idx + seq_len, count]
@@ -50,7 +54,7 @@ class TrainBatchSource:
             return data, target
 
     def next_batch(self, losses):
-        if self.epoch_no==0:
+        if self.epoch_no < self.start_epoch:
             self.statistics[self.batch_no : self.batch_no + self.bptt, :] += losses.view(self.bptt, self.bs_len)
         else:
             count = 0
@@ -61,8 +65,10 @@ class TrainBatchSource:
         self.batch_no += 1
 
     def next_epoch(self):
+        from torch.nn.functional import conv1d, pad
         self.epoch_no += 1
-        self.stat_cumsum = torch.cumsum(self.statistics, 0) + self.stat_cumsum_ones
+        out_conv = conv1d(self.statistics.T[:, None, :], self.filters, bias=None, padding="same")
+        self.stat_cumsum = torch.cumsum(out_conv, 2)[:,0,:] # + self.stat_cumsum_ones
         self.statistics /= self.bptt
         self.max = torch.max(self.stat_cumsum, 0)
 
