@@ -1,4 +1,5 @@
 from __future__ import print_function
+from torch.autograd import Variable
 import argparse
 import math
 import torch
@@ -38,11 +39,11 @@ class Net(nn.Module):
 
 
 class LinearRegression(torch.nn.Module):
-    def __init__(self, n, dev):
+    def __init__(self, n, e, w, dev):
         super(LinearRegression, self).__init__()
         self.n = n #batch size
-        self.e = 1 #embeding
-        self.w = nn.Parameter(torch.rand((n, self.e), requires_grad=True, device=dev))
+        self.e = e #embeding
+        self.w = nn.Parameter(w)
     def forward(self, x):
         x = torch.triu(x, diagonal=1)
         x = x[:, :, None]
@@ -55,15 +56,15 @@ class LinearRegression(torch.nn.Module):
         return c1
 
 
-def process_losses(losses):
+def process_losses(losses, e, w):
     dev = losses[0].device
     diff = losses[1] - losses[0]
     samples = torch.cartesian_prod(diff, diff)
     n = losses[0].shape[0]
     samples = samples.view(n, n, 2)
-    L = samples[:, :, 0]/(samples[:, :, 1] + 1e-6)
-    sampler_reg = LinearRegression(n, dev)
-    from torch.autograd import Variable
+    L = samples[:, :, 0]/(samples[:, :, 1] + 0.01)
+    sampler_reg = LinearRegression(n, e, w, dev)
+
     optimizer = torch.optim.SGD(sampler_reg.parameters(), lr=0.1)
     scheduler = StepLR(optimizer, step_size=1, gamma=0.7)
     inputs = Variable(L.to(dev))
@@ -87,26 +88,28 @@ def process_losses(losses):
         if (cur < prev):
             prev = cur
             weight = sampler_reg.w.clone()
-    #print("Stop on losses: {} -> {} with LR {} after {}".format(initL, cur, scheduler.get_lr(), epoch))
+    print("Stop on losses: {} -> {} with LR {} after {}".format(initL, cur, scheduler.get_lr(), epoch))
     k = 1/torch.sum(torch.abs(weight), axis=1)
     return k
 
 
-def train(args, model, device, train_loader, optimizer, epoch, sampler):
+def train(args, model, device, train_loader, optimizer, epoch, sampler, e, w):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         losses = {}
         data, target = data.to(device), target.to(device)
+        local_w = w[sampler.batch].clone()
         for i in range(0, 2):
             optimizer.zero_grad()
             output = model(data)
-            output = F.log_softmax(output, dim=1)
+            # output = F.log_softmax(output, dim=1)
             tmp = F.nll_loss(output, target, reduction='none')
             losses[i] = tmp.clone()
             loss = torch.mean(tmp)
             loss.backward()
             optimizer.step()
-        knowledge = process_losses(losses)
+        knowledge = process_losses(losses, e, local_w)
+        w[sampler.batch] += local_w.detach()
         sampler.update_stats(knowledge)
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -125,7 +128,7 @@ def test(model, device, test_loader):
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            output = F.log_softmax(output, dim=1)
+            # output = F.log_softmax(output, dim=1)
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
@@ -184,43 +187,46 @@ def main():
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.RandomAffine(degrees=30),
-        transforms.RandomPerspective(),
-        transforms.Normalize((0.1307,), (0.3081,))
-        ])
-    # transform=transforms.Compose([
+    # transform = transforms.Compose([
     #     transforms.ToTensor(),
+    #     transforms.RandomAffine(degrees=30),
+    #     transforms.RandomPerspective(),
     #     transforms.Normalize((0.1307,), (0.3081,))
     #     ])
+    transform=transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+        ])
     dataset1 = datasets.MNIST('../data', train=True, download=True,
                        transform=transform)
     dataset2 = datasets.MNIST('../data', train=False,
                        transform=transform)
     alpha = 0.1
-    sampler = mygen.MyBatchSampler(len(dataset1), dev = device, batch_size=args.batch_size, alpha= alpha)
+    sampler = mygen.MyBatchSampler(len(dataset1), dev = device, batch_size=args.batch_size, alpha= alpha, mode=True)
     train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler=sampler)#, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
-    #model = Net().to(device)
-    from torchvision import models
-    model_ft = models.resnet18(weights=None)
-    # change input layer
-    # the default number of input channel in the resnet is 3, but our images are 1 channel. So we have to change 3 to 1.
-    # nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False) <- default
-    model_ft.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-    # change fc layer
-    # the number of classes in our dataset is 10. default is 1000.
-    num_ftrs = model_ft.fc.in_features
-    model_ft.fc = nn.Linear(num_ftrs, 10)
-    model = model_ft.to(device)
+    model = Net().to(device)
+    # from torchvision import models
+    # model_ft = models.resnet18(weights=None)
+    # # change input layer
+    # # the default number of input channel in the resnet is 3, but our images are 1 channel. So we have to change 3 to 1.
+    # # nn.Conv2d(3, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False) <- default
+    # model_ft.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+    # # change fc layer
+    # # the number of classes in our dataset is 10. default is 1000.
+    # num_ftrs = model_ft.fc.in_features
+    # model_ft.fc = nn.Linear(num_ftrs, 10)
+    # model = model_ft.to(device)
 
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+    e = 8
+    w = torch.rand((len(train_loader.dataset), e), requires_grad=False, device=device)
+
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch, sampler)
+        train(args, model, device, train_loader, optimizer, epoch, sampler, e, w)
         test(model, device, test_loader)
         scheduler.step()
         print("LR ", scheduler.get_last_lr())
