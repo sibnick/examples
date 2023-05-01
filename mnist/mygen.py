@@ -1,3 +1,7 @@
+from torch.utils.data import Sampler
+from typing import Optional
+import collections
+
 import torch
 from torch.utils.data import Sampler
 from typing import Optional
@@ -38,16 +42,11 @@ class MyRandomSampler(Sampler[int]):
 
     def __iter__(self):
         n = self.data_source_len
-        if self.stat_cumsum is None:
-            for _ in range(self.num_samples // n):
-                yield from torch.randperm(n, generator=self.generator).tolist()
-            yield from torch.randperm(n, generator=self.generator).tolist()[:self.num_samples % n]
-        else:
-            values = torch.rand(n).cuda() * self.stat_cumsum[n - 1]
-            values -= 1
-            for _ in range(self.num_samples // n):
-                yield from torch.searchsorted(self.stat_cumsum, values).tolist()
-            yield from torch.searchsorted(self.stat_cumsum, values).tolist()[:self.num_samples % n]
+        values = torch.rand(n).cuda() * self.stat_cumsum[n - 1]
+        values -= 1
+        for _ in range(self.num_samples // n):
+            yield from torch.searchsorted(self.stat_cumsum, values).tolist()
+        yield from torch.searchsorted(self.stat_cumsum, values).tolist()[:self.num_samples % n]
 
     def update(self, stat_cumsum):
         self.stat_cumsum = stat_cumsum
@@ -81,6 +80,7 @@ class MyBatchSampler:
         self.ds_len = ds_len
         self.mode = mode
         self.statistics = torch.ones(ds_len, requires_grad=False).to(dev)
+        self.count_statistics = torch.ones(ds_len, requires_grad=False).to(dev)
         self.stat_cumsum = torch.cumsum(self.statistics, 0).to(dev)
 
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
@@ -90,10 +90,12 @@ class MyBatchSampler:
 
         self.sampler = MyRandomSampler(ds_len)
         self.batch_size = batch_size
+        self.sampler.update(self.stat_cumsum)
 
     def update_stats(self, loss):
         if self.mode:
             self.statistics[self.batch] = loss * self.alpha + (1 - self.alpha) * self.statistics[self.batch]
+            self.count_statistics[self.batch] += 1
             mean_val = torch.mean(loss)
             self.statistics[self.statistics < mean_val / 10] = mean_val / 10
 

@@ -39,86 +39,101 @@ class Net(nn.Module):
 
 
 class LinearRegression(torch.nn.Module):
-    def __init__(self, n, e, w, dev):
+    def __init__(self, n, a, b, inputs):
         super(LinearRegression, self).__init__()
-        self.n = n #batch size
-        self.e = e #embeding
-        self.w = nn.Parameter(w)
-    def forward(self, x):
-        x = torch.triu(x, diagonal=1)
-        x = x[:, :, None]
-        x = x.repeat(1, 1, self.e)
-        ww = self.w[:, None, :].repeat(1, self.n, 1)
-        w2 = self.w[None, :, :].repeat(self.n, 1, 1)
-        w2 = torch.triu(w2, diagonal=1)
-        c1 = x * ww - w2
-        #c1_loss = torch.sum(c1) + torch.abs(self.n - torch.sum(torch.abs(self.w)))
-        return c1
+        self.n = n
+        tmp = torch.arange(1, n + 1, requires_grad=False)
+        idx = torch.cartesian_prod(tmp, tmp)
+        idx = idx.view(n, n, 2)
+        self.idx = torch.nonzero(torch.triu(idx[:, :, 0], diagonal=1), as_tuple=False)
+        self.a = nn.Parameter(a)
+        self.b = nn.Parameter(b)
+        self.samples = nn.Parameter(b[self.idx[:, 0]] - b[self.idx[:, 1]])
+        self.inputs = inputs[self.idx[:, 0]] - inputs[self.idx[:, 1]]
+        in_size = a.shape[1] + b.shape[1]
+        self.model = nn.Sequential(
+            nn.Linear(in_size, 512),
+            nn.ReLU(),
+            nn.Linear(512, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        ).cuda()
+    def forward(self, batch):
+        from torch import linalg as LA
+        # return LA.vector_norm(self.samples * self.a, dim=1) - losses
+        # return torch.sum(self.samples * self.a, dim=1) - self.inputs
+        start = 10000*batch
+        end = min(10000*(batch+1), self.samples.shape[0])
+        tmp = torch.cat((self.samples[start:end], self.a.repeat(10000, 1)),  dim=1)
+        return self.model(tmp) - self.inputs[None, start:end]
 
 
-def process_losses(losses, e, w):
+def process_losses(model_embedding, embeddings, losses):
     dev = losses[0].device
-    diff = losses[1] - losses[0]
-    samples = torch.cartesian_prod(diff, diff)
-    n = losses[0].shape[0]
-    samples = samples.view(n, n, 2)
-    L = samples[:, :, 0]/(samples[:, :, 1] + 0.01)
-    sampler_reg = LinearRegression(n, e, w, dev)
+    n = losses.shape[0]
+    e = embeddings.shape[0]
 
-    optimizer = torch.optim.SGD(sampler_reg.parameters(), lr=0.1)
-    scheduler = StepLR(optimizer, step_size=1, gamma=0.7)
-    inputs = Variable(L.to(dev))
+    inputs = losses.detach()
+    # samples_losses = torch.cartesian_prod(losses, losses)
+    # samples_losses = samples_losses.view(n, n, 2)
+    # samples_losses = samples_losses[:, :, 0] - samples_losses[:, :, 1]
+    # inputs = torch.triu(samples_losses, diagonal=1)
+
+    sampler_reg = LinearRegression(n, model_embedding.detach(), embeddings.detach(), inputs)
+    sampler_reg.train()
+    optimizer = torch.optim.SGD(sampler_reg.parameters(), lr=1)
+    scheduler = StepLR(optimizer, step_size=1, gamma=0.7)+
+
     prev = 1e+10
     initL = 0
-    weight = sampler_reg.w.clone()
-    for epoch in range(50):
-        optimizer.zero_grad()
-        outputs = sampler_reg(inputs)
-        loss = torch.sum(torch.abs(outputs))/(n*n-n)/2 + torch.abs(n - torch.sum(torch.abs(sampler_reg.w)))
-        if math.isnan(loss.item()):
-            print("!!!!")
-        if epoch == 0:
-            initL = loss
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        cur = loss.item()
-        if (cur > prev and epoch > 25) or math.isnan(cur):
-            break
-        if (cur < prev):
-            prev = cur
-            weight = sampler_reg.w.clone()
-    print("Stop on losses: {} -> {} with LR {} after {}".format(initL, cur, scheduler.get_lr(), epoch))
-    k = 1/torch.sum(torch.abs(weight), axis=1)
-    return k
+    tmp_model_embedding = model_embedding.clone()
+    tmp_embeddings = embeddings.clone()
 
-
-def train(args, model, device, train_loader, optimizer, epoch, sampler, e, w):
-    model.train()
-    for batch_idx, (data, target) in enumerate(train_loader):
-        losses = {}
-        data, target = data.to(device), target.to(device)
-        local_w = w[sampler.batch].clone()
-        for i in range(0, 2):
+    for epoch in range(5):
+        batch = sampler_reg.inputs.shape[0] // 10000
+        for b in range(0, batch):
             optimizer.zero_grad()
-            output = model(data)
-            # output = F.log_softmax(output, dim=1)
-            tmp = F.nll_loss(output, target, reduction='none')
-            losses[i] = tmp.clone()
-            loss = torch.mean(tmp)
+            outputs = sampler_reg(b)
+            loss = torch.mean(torch.abs(outputs))
+            if math.isnan(loss.item()):
+                print("!!!!")
             loss.backward()
             optimizer.step()
-        knowledge = process_losses(losses, e, local_w)
-        w[sampler.batch] += local_w.detach()
-        sampler.update_stats(knowledge)
+        scheduler.step()
+        print("losses: {} -> {} with LR {} after {}".format(initL, loss.item(), scheduler.get_lr(), epoch))
+    tmp_model_embedding = sampler_reg.a.clone()
+    tmp_embeddings = sampler_reg.b.clone()
+    print("Stop on losses: {} -> {} with LR {} after {}".format(initL, loss.item(), scheduler.get_lr(), epoch))
+    model_embedding = tmp_model_embedding
+    embeddings = tmp_embeddings
+    return (model_embedding.detach_(), embeddings.detach_())
+
+
+def train(args, model, device, train_loader, optimizer, epoch, sampler, model_embedding, sample_embeddings):
+    model.train()
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        sample_batch_embbeding = sample_embeddings[sampler.batch]
+        optimizer.zero_grad()
+        output = model(data)
+        # output = F.log_softmax(output, dim=1)
+        tmp = F.nll_loss(output, target, reduction='none')
+        losses = torch.zeros(tmp.shape, requires_grad=False, device=tmp.device)
+        losses = tmp
+        loss = torch.mean(tmp)
+        loss.backward()
+        optimizer.step()
+
+        (model_embedding, sample_batch_embbeding) = process_losses(model_embedding, sample_batch_embbeding, losses)
+        sample_embeddings[sampler.batch] = sample_batch_embbeding
+        #w[sampler.batch] += sample_batch_embbeding.detach()
+        #sampler.update_stats(knowledge)
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                        100. * batch_idx / len(train_loader), loss.item()))
             if args.dry_run:
                 break
-    return losses
-
 
 def test(model, device, test_loader):
     model.eval()
@@ -202,7 +217,7 @@ def main():
     dataset2 = datasets.MNIST('../data', train=False,
                        transform=transform)
     alpha = 0.1
-    sampler = mygen.MyBatchSampler(len(dataset1), dev = device, batch_size=args.batch_size, alpha= alpha, mode=True)
+    sampler = mygen.MyBatchSampler(len(dataset1), dev = device, batch_size=args.batch_size, alpha= alpha, mode=False)
     train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler=sampler)#, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
@@ -222,11 +237,15 @@ def main():
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
-    e = 8
-    w = torch.rand((len(train_loader.dataset), e), requires_grad=False, device=device)
+    embedding_size = 64
+    ds_len = len(train_loader.dataset)
+    model_embedding   = torch.rand((     1, 64), requires_grad=False, device=device)
+    torch.nn.init.xavier_uniform_(model_embedding)
+    sample_embbedings = torch.rand((ds_len, embedding_size), requires_grad=False, device=device)
+    torch.nn.init.xavier_uniform_(sample_embbedings)
 
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch, sampler, e, w)
+        train(args, model, device, train_loader, optimizer, epoch, sampler, model_embedding, sample_embbedings)
         test(model, device, test_loader)
         scheduler.step()
         print("LR ", scheduler.get_last_lr())
