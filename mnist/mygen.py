@@ -1,7 +1,3 @@
-from torch.utils.data import Sampler
-from typing import Optional
-import collections
-
 import torch
 from torch.utils.data import Sampler
 from typing import Optional
@@ -52,13 +48,15 @@ class MyRandomSampler(Sampler[int]):
 
 
 class MyBatchSampler:
-    def __init__(self, ds_len: int, batch_size: int, dev, mode=True) -> None:
+    def __init__(self, ds_len: int, batch_size: int, dev, window=5, mode=True) -> None:
         # Since collections.abc.Iterable does not check for `__getitem__`, which
         # is one way for an object to be an iterable, we don't do an `isinstance`
         # check here.
         self.ds_len = ds_len
         self.mode = mode
+        self.window = window
         self.statistics = torch.ones(ds_len, requires_grad=False).to(dev)
+        self.pearson_statistics = torch.zeros((ds_len, 6), requires_grad=False).to(dev)
         self.count_statistics = torch.zeros(ds_len, requires_grad=False).to(dev)
         self.stat_cumsum = torch.cumsum(self.statistics, 0).to(dev)
 
@@ -71,18 +69,41 @@ class MyBatchSampler:
         self.batch_size = batch_size
         self.sampler.update(self.stat_cumsum)
 
-    def update_stats(self, output):
+    def update_stats(self, loss, output):
         if self.mode:
             output = torch.softmax(output, dim=1)
+            output_max = output.max(dim=1)
+            self.pearson_corr(loss, output_max[0])
             max_idx = torch.argmax(output, dim=1, keepdim=True)
             output.scatter_(1, max_idx, 0)
-
-            self.statistics[self.batch] = output.max(dim=1)[0]
+            output_max = output.max(dim=1)[0]
+            self.statistics[self.batch] = output_max
+            #todo pow?
+            self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1, 1), 0)
             self.count_statistics[self.batch] += 1
-            self.stat_cumsum = torch.cumsum(self.statistics, 0)
             self.sum = self.stat_cumsum[self.ds_len - 1]
             self.sampler.update(self.stat_cumsum)
 
+    def pearson_corr(self, loss, xn1):
+        n = self.window
+        yn1 = loss
+        n1 = 1.0 / (1 + n)
+        data = self.pearson_statistics[self.batch]
+        mean_xn1 = data[:, 1] + n1 * (xn1[:] - data[:, 1])
+        mean_yn1 = data[:, 2] + n1 * (yn1 - data[:, 2])
+        nn1 = data[:, 3] + (xn1 - data[:, 1]) * (yn1 - mean_yn1)
+        dn1 = data[:, 4] + (xn1 - data[:, 1]) * (xn1 - mean_xn1)
+        en1 = data[:, 5] + (yn1 - data[:, 2]) * (yn1 - mean_yn1)
+        r = nn1 / torch.sqrt(dn1 * en1)
+        data = torch.zeros((self.batch_size, 6), device=self.pearson_statistics.device)
+        data[:, 0] = r
+        data[:, 1] = mean_xn1
+        data[:, 2] = mean_yn1
+        data[:, 3] = nn1
+        data[:, 4] = dn1
+        data[:, 5] = en1
+        self.pearson_statistics[self.batch] = data
+        return r
     def __iter__(self):
         sampler_iter = iter(self.sampler)
         while True:
