@@ -29,10 +29,8 @@ class MyRandomSampler(Sampler[int]):
 
     def __iter__(self):
         for idx in range(self.num_samples // self.values.shape[0]):
-            searchsorted = torch.searchsorted(self.stat_cumsum, self.values)
-            yield from searchsorted.tolist()
-        searchsorted = torch.searchsorted(self.stat_cumsum, self.values)
-        yield from searchsorted.tolist()[:self.num_samples % self.values.shape[0]]
+            yield from torch.searchsorted(self.stat_cumsum, self.values).tolist()
+        yield from torch.searchsorted(self.stat_cumsum, self.values).tolist()[:self.num_samples % self.values.shape[0]]
 
     def update(self, stat_cumsum):
         self.stat_cumsum = stat_cumsum
@@ -42,7 +40,6 @@ class MyRandomSampler(Sampler[int]):
 
     def next(self, n):
         self.values = torch.rand(n).cuda() * self.stat_cumsum[-1]
-        self.values -= 1
         self.n = n
         return self
 
@@ -69,17 +66,19 @@ class MyBatchSampler:
         self.batch_size = batch_size
         self.sampler.update(self.stat_cumsum)
 
-    def update_stats(self, loss, output):
+    def update_stats(self, loss, output, target):
         if self.mode:
             output = torch.softmax(output, dim=1)
-            output_max = output.max(dim=1)
-            self.pearson_corr(loss, output_max[0])
+            output_max0 = output.max(dim=1)
+            #self.pearson_corr(loss, output_max0[0])
             max_idx = torch.argmax(output, dim=1, keepdim=True)
             output.scatter_(1, max_idx, 0)
             output_max = output.max(dim=1)[0]
-            self.statistics[self.batch] = output_max
+            self.statistics[self.batch] = output_max #+ output_max0[0]/100
             #todo pow?
-            self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1, 1), 0)
+            #self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1, 2), 0)
+            # self.stat_cumsum = torch.cumsum(self.statistics * (self.pearson_statistics[:, 0] + 1), 0)
+            self.stat_cumsum = torch.cumsum(self.statistics, 0)
             self.count_statistics[self.batch] += 1
             self.sum = self.stat_cumsum[self.ds_len - 1]
             self.sampler.update(self.stat_cumsum)
@@ -90,11 +89,14 @@ class MyBatchSampler:
         n1 = 1.0 / (1 + n)
         data = self.pearson_statistics[self.batch]
         mean_xn1 = data[:, 1] + n1 * (xn1[:] - data[:, 1])
-        mean_yn1 = data[:, 2] + n1 * (yn1 - data[:, 2])
+        mean_yn1 = data[:, 2] + n1 * (yn1[:] - data[:, 2])
         nn1 = data[:, 3] + (xn1 - data[:, 1]) * (yn1 - mean_yn1)
         dn1 = data[:, 4] + (xn1 - data[:, 1]) * (xn1 - mean_xn1)
         en1 = data[:, 5] + (yn1 - data[:, 2]) * (yn1 - mean_yn1)
-        r = nn1 / torch.sqrt(dn1 * en1)
+        r = nn1 / (1e-4 + torch.sqrt(dn1 * en1))
+        if (torch.sum(torch.isnan(r))>0):
+            r = 1
+            print("!")
         data = torch.zeros((self.batch_size, 6), device=self.pearson_statistics.device)
         data[:, 0] = r
         data[:, 1] = mean_xn1
