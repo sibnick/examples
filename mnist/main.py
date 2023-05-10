@@ -19,6 +19,11 @@ class Net(nn.Module):
         self.dropout2 = nn.Dropout(0.5)
         self.fc1 = nn.Linear(9216, 128)
         self.fc2 = nn.Linear(128, 10)
+        # self.dropout2 = nn.Dropout(0.37)
+        # self.dropout3 = nn.Dropout(0.5)
+        # self.fc1 = nn.Linear(9216, 1024)
+        # self.fc2 = nn.Linear(1024, 1024)
+        # self.fc3 = nn.Linear(1024, 10)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -32,6 +37,9 @@ class Net(nn.Module):
         x = F.relu(x)
         x = self.dropout2(x)
         x = self.fc2(x)
+        # x = F.relu(x)
+        # x = self.dropout3(x)
+        # x = self.fc3(x)
         return x
 
 
@@ -42,11 +50,13 @@ def train(args, model, device, train_loader, optimizer, epoch):
         optimizer.zero_grad()
         output = model(data)
         tmp_loss = F.cross_entropy(output, target, reduction='none', label_smoothing=0.01)
+        # tmp_loss.retain_grad()
         loss = torch.mean(tmp_loss)
+        # loss.retain_grad()
         loss.backward()
         optimizer.step()
         if isinstance(train_loader.batch_sampler, mygen.MyBatchSampler):
-            train_loader.batch_sampler.update_stats(tmp_loss.detach(), output, target)
+            train_loader.batch_sampler.update_stats(loss.detach().item(), output, target)
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
@@ -144,17 +154,18 @@ def main():
                        transform=transform)
     sampler = mygen.MyBatchSampler(len(dataset1), dev=device, batch_size=args.batch_size, mode=True)
     train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler=sampler)
-    #train_loader = torch.utils.data.DataLoader(dataset1,**train_kwargs)
+    # train_loader = torch.utils.data.DataLoader(dataset1, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
     model = Net().to(device)
-    optimizer = optim.Adadelta(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    optimizer = optim.Adadelta(model.parameters(), lr=args.lr) #, weight_decay=1e-6)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
         train(args, model, device, train_loader, optimizer, epoch)
         test(model, device, test_loader)
         scheduler.step()
+        print("last LR: ", scheduler.get_last_lr())
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")

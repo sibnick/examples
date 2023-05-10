@@ -70,15 +70,17 @@ class MyBatchSampler:
         if self.mode:
             output = torch.softmax(output, dim=1)
             output_max0 = output.max(dim=1)
-            #self.pearson_corr(loss, output_max0[0])
+            output_diff = output_max0[0] - output[range(len(target)), target]
+            loss_tmp = loss - output[range(len(target)), target]/self.batch_size
+            self.pearson_corr(loss_tmp, output_diff)
             max_idx = torch.argmax(output, dim=1, keepdim=True)
             output.scatter_(1, max_idx, 0)
             output_max = output.max(dim=1)[0]
             self.statistics[self.batch] = output_max #+ output_max0[0]/100
             #todo pow?
-            #self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1, 2), 0)
-            # self.stat_cumsum = torch.cumsum(self.statistics * (self.pearson_statistics[:, 0] + 1), 0)
-            self.stat_cumsum = torch.cumsum(self.statistics, 0)
+            self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1.5, 2), 0)
+            # self.stat_cumsum = torch.cumsum(self.statistics * (self.pearson_statistics[:, 0] + 1.5), 0)
+            #self.stat_cumsum = torch.cumsum(self.statistics, 0)
             self.count_statistics[self.batch] += 1
             self.sum = self.stat_cumsum[self.ds_len - 1]
             self.sampler.update(self.stat_cumsum)
@@ -93,7 +95,7 @@ class MyBatchSampler:
         nn1 = data[:, 3] + (xn1 - data[:, 1]) * (yn1 - mean_yn1)
         dn1 = data[:, 4] + (xn1 - data[:, 1]) * (xn1 - mean_xn1)
         en1 = data[:, 5] + (yn1 - data[:, 2]) * (yn1 - mean_yn1)
-        r = nn1 / (1e-4 + torch.sqrt(dn1 * en1))
+        r = nn1 / (1e-6 + torch.sqrt(1e-6 + dn1 * en1))
         if (torch.sum(torch.isnan(r))>0):
             r = 1
             print("!")
