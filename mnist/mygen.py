@@ -1,3 +1,4 @@
+import numpy
 import torch
 from torch.utils.data import Sampler
 from typing import Optional
@@ -52,9 +53,11 @@ class MyBatchSampler:
         self.ds_len = ds_len
         self.mode = mode
         self.window = window
-        self.statistics = torch.ones(ds_len, requires_grad=False).to(dev)
+        self.statistics = 1000*torch.ones(ds_len, requires_grad=False).to(dev)
         self.pearson_statistics = torch.zeros((ds_len, 6), requires_grad=False).to(dev)
-        self.count_statistics = torch.zeros(ds_len, requires_grad=False).to(dev)
+        self.pearson_statistics[:, 0] = 1
+        self.count_pearson = torch.zeros((ds_len), dtype=torch.int32, requires_grad=False).to(dev)
+        self.count_statistics = torch.zeros(ds_len, dtype=torch.int32, requires_grad=False).to(dev)
         self.stat_cumsum = torch.cumsum(self.statistics, 0).to(dev)
 
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
@@ -68,28 +71,34 @@ class MyBatchSampler:
 
     def update_stats(self, loss, output, target):
         if self.mode:
-            output = torch.softmax(output, dim=1)
+            output = torch.softmax(output, dim=1).detach()
             output_max0 = output.max(dim=1)
-            output_diff = output_max0[0] - output[range(len(target)), target]
-            loss_tmp = loss - output[range(len(target)), target]/self.batch_size
-            self.pearson_corr(loss_tmp, output_diff)
+            wrong_batch_idx = output_max0[1] != target
+            wrong_batch_idx = wrong_batch_idx.nonzero()[:, 0].cpu().numpy()
+            wrong_idx = self.batch[wrong_batch_idx]
+            self.count_pearson[wrong_idx] += 1
+
+            output_diff = output_max0[0][wrong_batch_idx] - output[wrong_batch_idx, target[wrong_batch_idx]]
+            loss_tmp = loss - output[wrong_batch_idx, target[wrong_batch_idx]]/self.batch_size
+            self.pearson_corr(wrong_idx, loss_tmp, output_diff)
             max_idx = torch.argmax(output, dim=1, keepdim=True)
             output.scatter_(1, max_idx, 0)
             output_max = output.max(dim=1)[0]
             self.statistics[self.batch] = output_max #+ output_max0[0]/100
+
             #todo pow?
-            self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1.5, 2), 0)
+            # self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1.5, 2), 0)
             # self.stat_cumsum = torch.cumsum(self.statistics * (self.pearson_statistics[:, 0] + 1.5), 0)
-            #self.stat_cumsum = torch.cumsum(self.statistics, 0)
+            self.stat_cumsum = torch.cumsum(self.statistics, 0)
             self.count_statistics[self.batch] += 1
             self.sum = self.stat_cumsum[self.ds_len - 1]
             self.sampler.update(self.stat_cumsum)
 
-    def pearson_corr(self, loss, xn1):
+    def pearson_corr(self, wrong_idx, loss, xn1):
         n = self.window
         yn1 = loss
         n1 = 1.0 / (1 + n)
-        data = self.pearson_statistics[self.batch]
+        data = self.pearson_statistics[wrong_idx]
         mean_xn1 = data[:, 1] + n1 * (xn1[:] - data[:, 1])
         mean_yn1 = data[:, 2] + n1 * (yn1[:] - data[:, 2])
         nn1 = data[:, 3] + (xn1 - data[:, 1]) * (yn1 - mean_yn1)
@@ -99,21 +108,21 @@ class MyBatchSampler:
         if (torch.sum(torch.isnan(r))>0):
             r = 1
             print("!")
-        data = torch.zeros((self.batch_size, 6), device=self.pearson_statistics.device)
+        data = torch.zeros((wrong_idx.shape[0], 6), device=self.pearson_statistics.device, requires_grad=False)
         data[:, 0] = r
         data[:, 1] = mean_xn1
         data[:, 2] = mean_yn1
         data[:, 3] = nn1
         data[:, 4] = dn1
         data[:, 5] = en1
-        self.pearson_statistics[self.batch] = data
+        self.pearson_statistics[wrong_idx] = data
         return r
     def __iter__(self):
         sampler_iter = iter(self.sampler)
         while True:
             try:
                 self.sampler.next(self.batch_size)
-                self.batch = [next(sampler_iter) for _ in range(self.batch_size)]
+                self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
                 yield self.batch
             except StopIteration:
                 break

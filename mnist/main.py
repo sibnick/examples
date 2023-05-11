@@ -173,3 +173,11 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+#import PIL.Image as pil
+# idxs = (sampler.count_pearson>4).nonzero().cpu().numpy()
+# p = sampler.pearson_statistics[(sampler.count_pearson>4).nonzero().cpu().numpy(), 0].cpu().detach().numpy()
+# for idx in  idxs[np.where(p<0.5)]: print(idx, " ", sampler.count_pearson[idx].item(), " ", sampler.count_statistics[idx].item(), " ", sampler.statistics[idx].item(), " ", sampler.pearson_statistics[idx, 0].item());
+#idx=1666; img = pil.fromarray(dataset1.data[idx].numpy(), 'L'); img.show(title=dataset1.targets[idx].item()); print(dataset1.targets[idx].item());
+#sampler.pearson_statistics[:, 0][sampler.pearson_statistics[:, 0].nonzero()[:, 0]].topk(1000, largest=True)
+#
