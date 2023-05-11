@@ -80,12 +80,30 @@ class MyBatchSampler:
 
             output_diff = output_max0[0][wrong_batch_idx] - output[wrong_batch_idx, target[wrong_batch_idx]]
             loss_tmp = loss - output[wrong_batch_idx, target[wrong_batch_idx]]/self.batch_size
-            self.pearson_corr(wrong_idx, loss_tmp, output_diff)
+            if wrong_idx.ndim > 0 and wrong_idx.shape[0] > 0:
+                self.pearson_corr(wrong_idx, loss_tmp, output_diff)
             max_idx = torch.argmax(output, dim=1, keepdim=True)
             output.scatter_(1, max_idx, 0)
             output_max = output.max(dim=1)[0]
             self.statistics[self.batch] = output_max #+ output_max0[0]/100
+            if wrong_idx.ndim > 0 and wrong_idx.shape[0] > 0:
+                # print(wrong_idx)
+                # print(self.count_pearson[wrong_idx] >= self.window)
+                # print(wrong_idx[(self.count_pearson[wrong_idx] >= self.window).cpu()])
+                tmp = self.count_pearson[wrong_idx] >= self.window
+                if tmp.shape == wrong_idx.shape and tmp.shape[0] == 1 and tmp[0]:
+                    effective_idx = wrong_idx
+                else:
+                    effective_idx = wrong_idx[tmp.cpu()]
 
+                if len(effective_idx.shape)>0 and effective_idx.shape[0] > 0:
+                    coef = 1e-3 + torch.pow(self.pearson_statistics[effective_idx][:, 0], 2)
+                    # print("Reduce probability for ", effective_idx, " by ", coef, " from ", self.statistics[effective_idx])
+                    self.statistics[effective_idx] *= coef
+
+            # idxs = (self.count_pearson>4).nonzero().cpu().numpy()
+            # p = sampler.pearson_statistics[(self.count_pearson>4).nonzero().cpu().numpy(), 0].cpu().detach().numpy()
+            # idxs[np.where(p<0.5)]
             #todo pow?
             # self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1.5, 2), 0)
             # self.stat_cumsum = torch.cumsum(self.statistics * (self.pearson_statistics[:, 0] + 1.5), 0)
