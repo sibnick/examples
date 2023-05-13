@@ -1,17 +1,42 @@
 from __future__ import print_function
 import argparse
+from typing import Optional, Union, overload
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch import device, dtype, Tensor
+from torch.nn.modules.module import T
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 
 from mnist import mygen
 
 
+class label_smooth_loss(torch.nn.Module):
+    def __init__(self, ds_len, num_classes, device, smoothing=0.01):
+        super(label_smooth_loss, self).__init__()
+        eps = smoothing / num_classes
+        self.num_classes = num_classes
+        self.smoothing = smoothing
+        self.negative = torch.ones(ds_len, requires_grad=False, device=device) * eps
+        self.positive = torch.ones(ds_len, requires_grad=False, device=device) - smoothing + eps
+
+    def forward(self, pred, target, idx):
+        pred = pred.log_softmax(dim=1)
+        true_dist = self.negative[idx, None].repeat(1, self.num_classes)
+        true_dist.scatter_(1, target.data.unsqueeze(1), self.positive[idx, None])
+        return torch.sum(-true_dist * pred, dim=1)
+
+    def update(self, idx, stats):
+        local_smoothing = 1 - ((0.8 - self.smoothing) + stats / 5)
+        eps = local_smoothing / self.num_classes
+        self.negative.scatter_(0, idx, eps)
+        self.positive.scatter_(0, idx, 1 - local_smoothing + eps)
+
 class Net(nn.Module):
-    def __init__(self):
+    def __init__(self, ds_len, device):
         super(Net, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
         self.conv2 = nn.Conv2d(32, 64, 3, 1)
@@ -19,6 +44,8 @@ class Net(nn.Module):
         self.dropout2 = nn.Dropout(0.5)
         self.fc1 = nn.Linear(9216, 128)
         self.fc2 = nn.Linear(128, 10)
+        self.smooth_loss = label_smooth_loss(ds_len, 10, device)
+        self.to(device)
         # self.dropout2 = nn.Dropout(0.37)
         # self.dropout3 = nn.Dropout(0.5)
         # self.fc1 = nn.Linear(9216, 1024)
@@ -49,14 +76,17 @@ def train(args, model, device, train_loader, optimizer, epoch):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
-        tmp_loss = F.cross_entropy(output, target, reduction='none', label_smoothing=0.01)
-        # tmp_loss.retain_grad()
+        if isinstance(train_loader.batch_sampler, mygen.MyBatchSampler):
+            tmp_loss = model.smooth_loss(output, target, train_loader.batch_sampler.batch)
+        else:
+            tmp_loss = F.cross_entropy(output, target, reduction='none', label_smoothing=0.01)
         loss = torch.mean(tmp_loss)
-        # loss.retain_grad()
         loss.backward()
         optimizer.step()
         if isinstance(train_loader.batch_sampler, mygen.MyBatchSampler):
-            train_loader.batch_sampler.update_stats(loss.detach().item(), output, target)
+            (stats, stats_idx) = train_loader.batch_sampler.update_stats(tmp_loss.detach())
+            if stats_idx.count_nonzero() > 0:
+                model.smooth_loss.update(stats_idx, stats)
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
@@ -152,12 +182,12 @@ def main():
                        transform=train_transform)
     dataset2 = datasets.MNIST('../data', train=False,
                        transform=transform)
-    sampler = mygen.MyBatchSampler(len(dataset1), dev=device, batch_size=args.batch_size, mode=True)
+    sampler = mygen.MyBatchSampler(len(dataset1), dev=device, batch_size=args.batch_size)
     train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler=sampler)
-    # train_loader = torch.utils.data.DataLoader(dataset1, **train_kwargs)
+    #train_loader = torch.utils.data.DataLoader(dataset1, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
-    model = Net().to(device)
+    model = Net(len(dataset1), device)
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr) #, weight_decay=1e-6)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
@@ -178,6 +208,7 @@ if __name__ == '__main__':
 # idxs = (sampler.count_pearson>4).nonzero().cpu().numpy()
 # p = sampler.pearson_statistics[(sampler.count_pearson>4).nonzero().cpu().numpy(), 0].cpu().detach().numpy()
 # for idx in  idxs[np.where(p<0.5)]: print(idx, " ", sampler.count_pearson[idx].item(), " ", sampler.count_statistics[idx].item(), " ", sampler.statistics[idx].item(), " ", sampler.pearson_statistics[idx, 0].item());
+# print(idx, " ", sampler.count_statistics[idx].item(), " ", sampler.statistics[idx].item(), " ", sampler.pearson_statistics[idx, 0].item());
 # idx=1666; img = pil.fromarray(dataset1.data[idx].numpy(), 'L'); img.show(title=dataset1.targets[idx].item()); print(dataset1.targets[idx].item());
 # sampler.pearson_statistics[:, 0][sampler.pearson_statistics[:, 0].nonzero()[:, 0]].topk(1000, largest=True)
 #

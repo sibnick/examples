@@ -46,17 +46,16 @@ class MyRandomSampler(Sampler[int]):
 
 
 class MyBatchSampler:
-    def __init__(self, ds_len: int, batch_size: int, dev, window=5, mode=True) -> None:
+    def __init__(self, ds_len: int, batch_size: int, dev, window=3) -> None:
         # Since collections.abc.Iterable does not check for `__getitem__`, which
         # is one way for an object to be an iterable, we don't do an `isinstance`
         # check here.
+        self.dev = dev
         self.ds_len = ds_len
-        self.mode = mode
         self.window = window
-        self.statistics = 1000*torch.ones(ds_len, requires_grad=False).to(dev)
+        self.statistics = 1000*torch.ones(ds_len, dtype=torch.float32, requires_grad=False).to(dev)
         self.pearson_statistics = torch.zeros((ds_len, 6), requires_grad=False).to(dev)
         self.pearson_statistics[:, 0] = 1
-        self.count_pearson = torch.zeros((ds_len), dtype=torch.int32, requires_grad=False).to(dev)
         self.count_statistics = torch.zeros(ds_len, dtype=torch.int32, requires_grad=False).to(dev)
         self.stat_cumsum = torch.cumsum(self.statistics, 0).to(dev)
 
@@ -69,54 +68,25 @@ class MyBatchSampler:
         self.batch_size = batch_size
         self.sampler.update(self.stat_cumsum)
 
-    def update_stats(self, loss, output, target):
-        if self.mode:
-            output = torch.softmax(output, dim=1).detach()
-            output_max0 = output.max(dim=1)
-            wrong_batch_idx = output_max0[1] != target
-            wrong_batch_idx = wrong_batch_idx.nonzero()[:, 0].cpu().numpy()
-            wrong_idx = self.batch[wrong_batch_idx]
-            self.count_pearson[wrong_idx] += 1
+    def update_stats(self, loss):
+        self.statistics.scatter_(0, self.batch, loss)
+        mean_val = torch.mean(loss)
+        self.statistics[self.statistics < mean_val / 10] = mean_val / 10
 
-            output_diff = output_max0[0][wrong_batch_idx] - output[wrong_batch_idx, target[wrong_batch_idx]]
-            loss_tmp = loss - output[wrong_batch_idx, target[wrong_batch_idx]]/self.batch_size
-            if wrong_idx.ndim > 0 and wrong_idx.shape[0] > 0:
-                self.pearson_corr(wrong_idx, loss_tmp, output_diff)
-            max_idx = torch.argmax(output, dim=1, keepdim=True)
-            output.scatter_(1, max_idx, 0)
-            output_max = output.max(dim=1)[0]
-            self.statistics[self.batch] = output_max #+ output_max0[0]/100
-            if wrong_idx.ndim > 0 and wrong_idx.shape[0] > 0:
-                # print(wrong_idx)
-                # print(self.count_pearson[wrong_idx] >= self.window)
-                # print(wrong_idx[(self.count_pearson[wrong_idx] >= self.window).cpu()])
-                tmp = self.count_pearson[wrong_idx] >= self.window
-                if tmp.shape == wrong_idx.shape and tmp.shape[0] == 1 and tmp[0]:
-                    effective_idx = wrong_idx
-                else:
-                    effective_idx = wrong_idx[tmp.cpu()]
+        local_loss = mean_val - loss/self.batch_size
+        corr = self.pearson_corr(self.batch, loss, local_loss)
 
-                if len(effective_idx.shape)>0 and effective_idx.shape[0] > 0:
-                    coef = 1e-3 + torch.pow(self.pearson_statistics[effective_idx][:, 0], 2)
-                    # print("Reduce probability for ", effective_idx, " by ", coef, " from ", self.statistics[effective_idx])
-                    self.statistics[effective_idx] *= coef
+        self.stat_cumsum = torch.cumsum(self.statistics, 0)
+        self.count_statistics.scatter_(0, self.batch, 1, reduce='add')
+        self.sum = self.stat_cumsum[self.ds_len - 1]
+        self.sampler.update(self.stat_cumsum)
+        return corr, torch.where(self.count_statistics[self.batch]>=self.window)[0]
 
-            # idxs = (self.count_pearson>4).nonzero().cpu().numpy()
-            # p = sampler.pearson_statistics[(self.count_pearson>4).nonzero().cpu().numpy(), 0].cpu().detach().numpy()
-            # idxs[np.where(p<0.5)]
-            #todo pow?
-            # self.stat_cumsum = torch.cumsum(self.statistics * torch.pow(self.pearson_statistics[:, 0] + 1.5, 2), 0)
-            # self.stat_cumsum = torch.cumsum(self.statistics * (self.pearson_statistics[:, 0] + 1.5), 0)
-            self.stat_cumsum = torch.cumsum(self.statistics, 0)
-            self.count_statistics[self.batch] += 1
-            self.sum = self.stat_cumsum[self.ds_len - 1]
-            self.sampler.update(self.stat_cumsum)
-
-    def pearson_corr(self, wrong_idx, loss, xn1):
+    def pearson_corr(self, idx, loss, xn1):
         n = self.window
         yn1 = loss
         n1 = 1.0 / (1 + n)
-        data = self.pearson_statistics[wrong_idx]
+        data = self.pearson_statistics[idx]
         mean_xn1 = data[:, 1] + n1 * (xn1[:] - data[:, 1])
         mean_yn1 = data[:, 2] + n1 * (yn1[:] - data[:, 2])
         nn1 = data[:, 3] + (xn1 - data[:, 1]) * (yn1 - mean_yn1)
@@ -126,22 +96,22 @@ class MyBatchSampler:
         if (torch.sum(torch.isnan(r))>0):
             r = 1
             print("!")
-        data = torch.zeros((wrong_idx.shape[0], 6), device=self.pearson_statistics.device, requires_grad=False)
+        data = torch.zeros((idx.shape[0], 6), device=self.pearson_statistics.device, requires_grad=False)
         data[:, 0] = r
         data[:, 1] = mean_xn1
         data[:, 2] = mean_yn1
         data[:, 3] = nn1
         data[:, 4] = dn1
         data[:, 5] = en1
-        self.pearson_statistics[wrong_idx] = data
+        self.pearson_statistics[idx] = data
         return r
     def __iter__(self):
         sampler_iter = iter(self.sampler)
         while True:
             try:
                 self.sampler.next(self.batch_size)
-                self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
-                yield self.batch
+                self.batch = torch.tensor([next(sampler_iter) for _ in range(self.batch_size)], device=self.dev, requires_grad=False)
+                yield self.batch.detach().cpu().numpy()
             except StopIteration:
                 break
 
