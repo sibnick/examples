@@ -37,10 +37,8 @@ class Net(nn.Module):
         x = F.relu(x)
         x = self.dropout2(x)
         x = self.fc2(x)
-        # x = F.relu(x)
-        # x = self.dropout3(x)
-        # x = self.fc3(x)
-        return x
+        output = F.log_softmax(x, dim=1)
+        return output
 
 
 def train(args, model, device, train_loader, optimizer, epoch):
@@ -49,14 +47,11 @@ def train(args, model, device, train_loader, optimizer, epoch):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
-        tmp_loss = F.cross_entropy(output, target, reduction='none', label_smoothing=0.01)
-        # tmp_loss.retain_grad()
-        loss = torch.mean(tmp_loss)
-        # loss.retain_grad()
+        loss = F.nll_loss(output, target)
         loss.backward()
         optimizer.step()
         if isinstance(train_loader.batch_sampler, mygen.MyBatchSampler):
-            train_loader.batch_sampler.update_stats(loss.detach().item(), output, target)
+            train_loader.batch_sampler.update_stats(epoch, output, target)
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
@@ -73,7 +68,7 @@ def test(model, device, test_loader):
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            test_loss += F.cross_entropy(output, target, reduction='sum').item()  # sum up batch loss
+            test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
 
