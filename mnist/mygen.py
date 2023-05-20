@@ -45,15 +45,22 @@ class MyRandomSampler(Sampler[int]):
         return self
 
 
+def calc_coef(epoch, coef):
+    coef = 10 * coef / epoch
+    coef = max(10, coef)
+    coef2 = 0.5 - 1 / coef
+    return coef, coef2
+
 class MyBatchSampler:
-    def __init__(self, ds_len: int, batch_size: int, dev, window=5, coef=1000, mode=True) -> None:
+    def __init__(self, ds_len: int, batch_size: int, dev, window=5, coef=1000, calc_coef_func = calc_coef) -> None:
         # Since collections.abc.Iterable does not check for `__getitem__`, which
         # is one way for an object to be an iterable, we don't do an `isinstance`
         # check here.
         self.ds_len = ds_len
-        self.mode = mode
         self.window = window
         self.coef = coef
+        self.prev_batch = None
+        self.calc_coef_func = calc_coef_func
         self.statistics = coef*torch.ones(ds_len, requires_grad=False).to(dev)
         self.pearson_statistics = torch.zeros((ds_len, 6), requires_grad=False).to(dev)
         self.pearson_statistics[:, 0] = 1
@@ -70,29 +77,35 @@ class MyBatchSampler:
         self.batch_size = batch_size
         self.sampler.update(self.stat_cumsum)
 
-    def update_stats(self, epoch, output, target):
-        if self.mode:
-            coef = 10 * self.coef / epoch
-            coef = max(10, coef)
-            coef2 = 0.5 - 1/coef
-            output = torch.softmax(output, dim=1).detach()
-            # max_idx = torch.argmax(output, dim=1, keepdim=True)
-            # output.scatter_(1, max_idx, 0)
-            output.scatter_(1, target[:, None], 0)
-            output_max = output.max(dim=1)[0]
-            self.statistics[self.batch] = (torch.sigmoid(output_max) - coef2)*coef
-            self.stat_cumsum = torch.cumsum(self.statistics, 0)
-            self.count_statistics[self.batch] += 1
-            self.sum = self.stat_cumsum[self.ds_len - 1]
-            self.sampler.update(self.stat_cumsum)
+    def update_stats(self, epoch, loss, output, target):
+        coef, coef2 = self.calc_coef_func(epoch, self.coef)
+        output = torch.softmax(output, dim=1).detach()
+        # max_idx = torch.argmax(output, dim=1, keepdim=True)
+        # output.scatter_(1, max_idx, 0)
+        output.scatter_(1, target[:, None], 0)
+        output_max = output.max(dim=1)[0]
+        corr = 1 + self.pearson_statistics[self.batch, 0]
+        self.statistics[self.batch] = corr * (torch.sigmoid(output_max) - coef2)*coef
+        if self.prev_batch is not None:
+            self.pearson_corr(loss/(1e-6 + self.prev_loss), self.prev_batch, self.prev_output)
+        self.prev_loss = loss
+        self.prev_batch = self.batch.copy()
+        self.prev_output = output_max.detach()
 
-    def pearson_corr(self, wrong_idx, loss, xn1):
+        self.stat_cumsum = torch.cumsum(self.statistics, 0)
+        self.count_statistics[self.batch] += 1
+
+        self.sum = self.stat_cumsum[self.ds_len - 1]
+        self.sampler.update(self.stat_cumsum)
+
+
+    def pearson_corr(self, loss, batch_idx, xn1):
         n = self.window
         yn1 = loss
         n1 = 1.0 / (1 + n)
-        data = self.pearson_statistics[wrong_idx]
+        data = self.pearson_statistics[batch_idx]
         mean_xn1 = data[:, 1] + n1 * (xn1[:] - data[:, 1])
-        mean_yn1 = data[:, 2] + n1 * (yn1[:] - data[:, 2])
+        mean_yn1 = data[:, 2] + n1 * (yn1 - data[:, 2])
         nn1 = data[:, 3] + (xn1 - data[:, 1]) * (yn1 - mean_yn1)
         dn1 = data[:, 4] + (xn1 - data[:, 1]) * (xn1 - mean_xn1)
         en1 = data[:, 5] + (yn1 - data[:, 2]) * (yn1 - mean_yn1)
@@ -100,14 +113,14 @@ class MyBatchSampler:
         if (torch.sum(torch.isnan(r))>0):
             r = 1
             print("!")
-        data = torch.zeros((wrong_idx.shape[0], 6), device=self.pearson_statistics.device, requires_grad=False)
+        data = torch.zeros((batch_idx.shape[0], 6), device=self.pearson_statistics.device, requires_grad=False)
         data[:, 0] = r
         data[:, 1] = mean_xn1
         data[:, 2] = mean_yn1
         data[:, 3] = nn1
         data[:, 4] = dn1
         data[:, 5] = en1
-        self.pearson_statistics[wrong_idx] = data
+        self.pearson_statistics[batch_idx] = data
         return r
     def __iter__(self):
         sampler_iter = iter(self.sampler)

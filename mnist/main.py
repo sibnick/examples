@@ -51,7 +51,7 @@ def train(args, model, device, train_loader, optimizer, epoch):
         loss.backward()
         optimizer.step()
         if isinstance(train_loader.batch_sampler, mygen.MyBatchSampler):
-            train_loader.batch_sampler.update_stats(epoch, output, target)
+            train_loader.batch_sampler.update_stats(epoch, loss.detach().item(), output, target)
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
@@ -147,7 +147,7 @@ def main():
                        transform=train_transform)
     dataset2 = datasets.MNIST('../data', train=False,
                        transform=transform)
-    sampler = mygen.MyBatchSampler(len(dataset1), dev=device, batch_size=args.batch_size, mode=True)
+    sampler = mygen.MyBatchSampler(len(dataset1), dev=device, batch_size=args.batch_size, coef=1000, window=3)
     train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler=sampler)
     # train_loader = torch.utils.data.DataLoader(dataset1, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
