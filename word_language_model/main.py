@@ -144,7 +144,7 @@ def get_batch(source, i):
     target = source[i+1:i+1+seq_len].view(-1)
     return data, target
 
-def get_train_batch(source, batch_sampler):
+def get_train_batch(source, sampler):
     batch_idx = sampler.next()
     seq_len = args.bptt
     data = torch.zeros((batch_idx.shape[0], seq_len), device=device, dtype=torch.int64)
@@ -184,7 +184,7 @@ def train():
     ntokens = len(corpus.dictionary)
     if args.model != 'Transformer':
         hidden = model.init_hidden(args.batch_size)
-    for i in range(0, int(train_data.size(0)/args.bptt)):
+    for i in range(0, int(train_data.size(0)/args.batch_size)):
         data, targets = get_train_batch(train_data, sampler)
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
@@ -210,7 +210,7 @@ def train():
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f}'.format(
-                epoch, i, len(train_data) // args.bptt, lr,
+                epoch, i, len(train_data) // args.batch_size, lr,
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()

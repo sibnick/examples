@@ -40,7 +40,7 @@ class MyRandomSampler(Sampler[int]):
         return self.num_samples
 
     def next(self, n):
-        self.values = torch.rand(n).cuda() * self.stat_cumsum[-1]
+        self.values = torch.rand(n).cuda() * self.stat_cumsum[self.data_source_len - 1]
         self.n = n
         return self
 
