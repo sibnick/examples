@@ -6,71 +6,9 @@ import os
 import torch
 import torch.nn as nn
 import torch.onnx
-
+import mygen
 import data
 import model
-
-class TrainBatchSource:
-
-    def __init__(self, bptt : int, source : torch.tensor, start_epoch=1):
-        self.bptt = bptt
-        self.source = source
-        self.batch_no = 0
-        self.epoch_no = 0
-        self.max = 0
-        self.start_epoch = start_epoch
-        self.ds_len = train_data.size(0) - 1
-        self.bs_len = train_data.size(1)
-        self.filters = torch.ones((bptt))[None, None, :].to(source.device)
-        self.bs_idx = torch.zeros(self.bs_len, dtype=int).to(source.device)
-        self.stat_cumsum_ones = torch.ones(self.ds_len, self.bs_len).to(source.device)
-        self.stat_cumsum_ones = torch.cumsum(self.stat_cumsum_ones, 0)
-        self.statistics = torch.zeros(self.ds_len, self.bs_len).to(source.device)
-        self.stat_cumsum = self.stat_cumsum_ones
-
-    def get_batch(self):
-        if self.epoch_no >= self.start_epoch :
-            values = torch.rand(self.bs_len).to(self.source.device) * self.stat_cumsum[:, -1] # find max for each batch
-            values = values.contiguous()
-            seq_len = self.bptt
-            data = torch.zeros(seq_len, self.bs_len, dtype=int).to(self.source.device)
-            target = torch.zeros(seq_len, self.bs_len, dtype=int).to(self.source.device)
-            count = 0
-            for i in values:
-                idx = torch.searchsorted(self.stat_cumsum[count, :], i) - self.bptt
-                idx = max(0, idx)
-                self.bs_idx[count] = idx
-                seq_len = min(self.bptt, len(self.source) - 1 - idx)
-                data[0:seq_len, count] = self.source[idx : idx + seq_len, count]
-                target[0:seq_len, count] = self.source[idx + 1: idx + 1 + seq_len, count]
-                count += 1
-            target = target.view(-1)
-            return data, target
-        else:
-            i = self.batch_no
-            seq_len = min(self.bptt, len(self.source) - 1 - i)
-            data = self.source[i:i + seq_len]
-            target = self.source[i + 1:i + 1 + seq_len].view(-1)
-            return data, target
-
-    def next_batch(self, losses):
-        if self.epoch_no < self.start_epoch:
-            self.statistics[self.batch_no : self.batch_no + self.bptt, :] += losses.view(self.bptt, self.bs_len)
-        else:
-            count = 0
-            for i in self.bs_idx:
-                seq_len = min(self.bptt, len(self.source) - 1 - i)
-                self.statistics[i : i + seq_len, count] += losses.view(self.bptt, self.bs_len)[0:seq_len, count]
-                count += 1
-        self.batch_no += 1
-
-    def next_epoch(self):
-        from torch.nn.functional import conv1d, pad
-        self.epoch_no += 1
-        out_conv = conv1d(self.statistics.T[:, None, :], self.filters, bias=None, padding="same")
-        self.stat_cumsum = torch.cumsum(out_conv, 2)[:,0,:] # + self.stat_cumsum_ones
-        self.statistics /= self.bptt
-        self.max = torch.max(self.stat_cumsum, 0)
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM/GRU/Transformer Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
@@ -160,11 +98,10 @@ def batchify(data, bsz):
     return data.to(device)
 
 eval_batch_size = 10
-train_data = batchify(corpus.train, args.batch_size)
+train_data = corpus.train
 val_data = batchify(corpus.valid, eval_batch_size)
 test_data = batchify(corpus.test, eval_batch_size)
 
-train_src = TrainBatchSource(args.bptt, train_data)
 ###############################################################################
 # Build the model
 ###############################################################################
@@ -175,7 +112,7 @@ if args.model == 'Transformer':
 else:
     model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
 
-criterion = nn.NLLLoss(reduction='none')
+criterion = nn.NLLLoss()
 
 ###############################################################################
 # Training code
@@ -189,6 +126,7 @@ def repackage_hidden(h):
     else:
         return tuple(repackage_hidden(v) for v in h)
 
+sampler = mygen.MyBatchSampler(train_data.shape[0], seq_len=args.bptt , bptt=args.bptt, dev=device, batch_size=args.batch_size, coef=1000, window=3)
 
 # get_batch subdivides the source data into chunks of length args.bptt.
 # If source is equal to the example output of the batchify function, with
@@ -205,6 +143,17 @@ def get_batch(source, i):
     data = source[i:i+seq_len]
     target = source[i+1:i+1+seq_len].view(-1)
     return data, target
+
+def get_train_batch(source, batch_sampler):
+    batch_idx = sampler.next()
+    seq_len = args.bptt
+    data = torch.zeros((batch_idx.shape[0], seq_len), device=device, dtype=torch.int64)
+    target = torch.zeros((batch_idx.shape[0], seq_len), device=device, dtype=torch.int64)
+    for i in range(batch_idx.shape[0]):
+        data[i] = source[batch_idx[i] : batch_idx[i] + seq_len]
+        target[i] = source[batch_idx[i] + 1 : batch_idx[i] + seq_len + 1]
+    target = target.T.reshape(-1)
+    return data.T, target
 
 
 def evaluate(data_source):
@@ -223,8 +172,7 @@ def evaluate(data_source):
             else:
                 output, hidden = model(data, hidden)
                 hidden = repackage_hidden(hidden)
-            losses = criterion(output, targets)
-            total_loss += len(data) * torch.mean(losses, 0).item()
+            total_loss += len(data) * criterion(output, targets).item()
     return total_loss / (len(data_source) - 1)
 
 
@@ -236,8 +184,8 @@ def train():
     ntokens = len(corpus.dictionary)
     if args.model != 'Transformer':
         hidden = model.init_hidden(args.batch_size)
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
-        data, targets = train_src.get_batch()
+    for i in range(0, int(train_data.size(0)/args.bptt)):
+        data, targets = get_train_batch(train_data, sampler)
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
         model.zero_grad()
@@ -247,11 +195,9 @@ def train():
         else:
             hidden = repackage_hidden(hidden)
             output, hidden = model(data, hidden)
-        losses = criterion(output, targets)
-        train_src.next_batch(losses)
-        loss = torch.mean(losses, 0)
+        loss = criterion(output, targets)
         loss.backward()
-
+        sampler.update_stats(epoch, loss.detach().item(), output, targets)
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         for p in model.parameters():
@@ -259,12 +205,12 @@ def train():
 
         total_loss += loss.item()
 
-        if batch % args.log_interval == 0 and batch > 0:
+        if i % args.log_interval == 0 and i > 0:
             cur_loss = total_loss / args.log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f}'.format(
-                epoch, batch, len(train_data) // args.bptt, lr,
+                epoch, i, len(train_data) // args.bptt, lr,
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
@@ -303,7 +249,6 @@ try:
         else:
             # Anneal the learning rate if no improvement has been seen in the validation dataset.
             lr /= 4.0
-        train_src.next_epoch()
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
