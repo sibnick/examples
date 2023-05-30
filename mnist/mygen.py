@@ -56,6 +56,7 @@ class MyBatchSampler:
         # Since collections.abc.Iterable does not check for `__getitem__`, which
         # is one way for an object to be an iterable, we don't do an `isinstance`
         # check here.
+        self.threshold = None
         self.ds_len = ds_len
         self.window = window
         self.coef = coef
@@ -93,6 +94,7 @@ class MyBatchSampler:
         self.prev_output = output_max.detach()
 
         self.stat_cumsum = torch.cumsum(self.statistics, 0)
+        self.threshold = torch.topk(self.statistics, k=int(self.ds_len / 10))[0][-1]
         self.count_statistics[self.batch] += 1
 
         self.sum = self.stat_cumsum[self.ds_len - 1]

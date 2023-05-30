@@ -8,6 +8,44 @@ from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 
 from mnist import mygen
+import MyMnist
+
+class EpochData:
+    def __init__(self):
+        self.epoch = 0
+        self.sampler = None
+
+    def __call__(self, idx: int) -> bool:
+        if self.sampler.count_statistics[idx] < 3:
+            return False
+        if self.sampler.statistics[idx] > self.sampler.threshold:
+            return False
+        return True
+
+
+class ConditionalTransform(torch.nn.Module):
+
+    def __init__(self, impl:torch.nn.Module) -> None:
+        super(ConditionalTransform, self).__init__()
+        self.impl = impl
+
+    def __call__(self, pic):
+        return self.impl(pic)
+
+class ConditionalCompose:
+    def __init__(self, checker, transforms):
+        super(ConditionalCompose, self).__init__()
+        self.checker = checker
+        self.transforms = transforms
+
+    def __call__(self, idx, img):
+        for t in self.transforms:
+            if type(t) is ConditionalTransform:
+                if self.checker(idx):
+                    img = t(img)
+            else:
+                img = t(img)
+        return img
 
 
 class Net(nn.Module):
@@ -135,19 +173,21 @@ def main():
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
         ])
-    train_transform = transform
-    # train_transform=transforms.Compose([
-    #     #                     transforms.RandomRotation(30),
-    #     transforms.RandomAffine(degrees=20, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-    #     transforms.ColorJitter(brightness=0.2, contrast=0.2),
-    #     transforms.ToTensor(),
-    #     transforms.Normalize((0.1307,), (0.3081,))
-    #     ])
-    dataset1 = datasets.MNIST('../data', train=True, download=True,
-                       transform=train_transform)
+    # train_transform = transform
+    check_transform = EpochData()
+    train_transform=ConditionalCompose(check_transform, [
+        #                     transforms.RandomRotation(30),
+        ConditionalTransform(transforms.RandomAffine(degrees=20, translate=(0.1, 0.1), scale=(0.9, 1.1))),
+        ConditionalTransform(transforms.ColorJitter(brightness=0.2, contrast=0.2)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+        ])
+    dataset1 = MyMnist.MyMnist('../data', train=True, download=True,
+                       transform=train_transform, checker=check_transform)
     dataset2 = datasets.MNIST('../data', train=False,
                        transform=transform)
     sampler = mygen.MyBatchSampler(len(dataset1), dev=device, batch_size=args.batch_size, coef=1000, window=3)
+    check_transform.sampler = sampler
     train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler=sampler)
     # train_loader = torch.utils.data.DataLoader(dataset1, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
@@ -157,6 +197,7 @@ def main():
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
+        check_transform.epoch = epoch
         train(args, model, device, train_loader, optimizer, epoch)
         test(model, device, test_loader)
         scheduler.step()
