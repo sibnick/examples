@@ -4,8 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch import Tensor
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
+from torchvision.models import ResNet
+from torchvision.models.resnet import BasicBlock
 
 from mnist import mygen
 import MyMnist
@@ -18,7 +21,7 @@ class EpochData:
     def __call__(self, idx: int) -> bool:
         if self.sampler.count_statistics[idx] < 3:
             return False
-        if self.sampler.statistics[idx] > self.sampler.threshold:
+        if self.sampler.statistics[idx] > self.sampler.threshold_max:
             return False
         return True
 
@@ -32,6 +35,25 @@ class ConditionalTransform(torch.nn.Module):
     def __call__(self, pic):
         return self.impl(pic)
 
+class ConditionalTransformWithParams(ConditionalTransform):
+
+    def __init__(self, impl, params_transform) -> None:
+        super(ConditionalTransformWithParams, self).__init__(impl)
+        orig_params = impl.get_params
+        self.current_idx = None
+        impl.get_params = lambda *args : self.get_params(self.get_current_idx, orig_params, params_transform, *args)
+
+    def get_current_idx(self):
+        return self.current_idx
+
+    def set_current_idx(self, idx):
+        self.current_idx = idx
+
+    @staticmethod
+    def get_params(get_idx, callable, params_transform, *args):
+        params = callable(*args)
+        return params_transform(get_idx(), *params)
+
 class ConditionalCompose:
     def __init__(self, checker, transforms):
         super(ConditionalCompose, self).__init__()
@@ -40,8 +62,10 @@ class ConditionalCompose:
 
     def __call__(self, idx, img):
         for t in self.transforms:
-            if type(t) is ConditionalTransform:
+            if issubclass(type(t), ConditionalTransform):
                 if self.checker(idx):
+                    if type(t) is ConditionalTransformWithParams:
+                        t.set_current_idx(idx)
                     img = t(img)
             else:
                 img = t(img)
@@ -78,6 +102,18 @@ class Net(nn.Module):
         output = F.log_softmax(x, dim=1)
         return output
 
+class MnistResNet(ResNet):
+    def __init__(self):
+        super(MnistResNet, self).__init__(BasicBlock, [2, 2, 2, 2], num_classes=10)
+        self.conv1 = torch.nn.Conv2d(1, 64,
+            kernel_size=(7, 7),
+            stride=(2, 2),
+            padding=(3, 3), bias=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self._forward_impl(x)
+        output = F.log_softmax(x, dim=1)
+        return output
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
@@ -175,9 +211,22 @@ def main():
         ])
     # train_transform = transform
     check_transform = EpochData()
-    train_transform=ConditionalCompose(check_transform, [
+    def affine_params_transform(idx, angle, translations, scale, shear):
+        if check_transform.sampler.threshold_min is None:
+            return angle, translations, scale, shear
+        coef = check_transform.sampler.statistics[idx]
+        if coef < check_transform.sampler.threshold_min:
+            return angle, translations, scale, shear
+        if coef > check_transform.sampler.threshold_max:
+            return (0, (0, 0), 1, (0, 0))
+        coef = (check_transform.sampler.threshold_max*1.01 - coef) / check_transform.sampler.threshold_max
+        coef = coef.detach().item()
+        return coef * angle, (coef * translations[0], coef * translations[1]), 1 - coef * (1-scale), (coef * shear[0], coef * shear[1])
+
+    train_transform = ConditionalCompose(check_transform, [
         #                     transforms.RandomRotation(30),
         ConditionalTransform(transforms.RandomAffine(degrees=20, translate=(0.1, 0.1), scale=(0.9, 1.1))),
+        # ConditionalTransformWithParams(transforms.RandomAffine(degrees=20, translate=(0.1, 0.1), scale=(0.9, 1.1)), affine_params_transform),
         ConditionalTransform(transforms.ColorJitter(brightness=0.2, contrast=0.2)),
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
@@ -192,9 +241,11 @@ def main():
     # train_loader = torch.utils.data.DataLoader(dataset1, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
-    model = Net().to(device)
+    # model = Net().to(device)
+    model = MnistResNet().to(device)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.1, steps_per_epoch=len(dataset1), epochs=14)
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr) #, weight_decay=1e-6)
-
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
         check_transform.epoch = epoch

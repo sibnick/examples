@@ -34,13 +34,13 @@ class MyRandomSampler(Sampler[int]):
         yield from torch.searchsorted(self.stat_cumsum, self.values).tolist()[:self.num_samples % self.values.shape[0]]
 
     def update(self, stat_cumsum):
-        self.stat_cumsum = stat_cumsum
+        self.stat_cumsum = stat_cumsum.cpu()
 
     def __len__(self) -> int:
         return self.num_samples
 
     def next(self, n):
-        self.values = torch.rand(n).cuda() * self.stat_cumsum[-1]
+        self.values = (torch.rand(n).cuda() * self.stat_cumsum[-1]).cpu()
         self.n = n
         return self
 
@@ -56,17 +56,18 @@ class MyBatchSampler:
         # Since collections.abc.Iterable does not check for `__getitem__`, which
         # is one way for an object to be an iterable, we don't do an `isinstance`
         # check here.
-        self.threshold = None
+        self.threshold_max = None
+        self.threshold_min = None
         self.ds_len = ds_len
         self.window = window
         self.coef = coef
         self.prev_batch = None
         self.calc_coef_func = calc_coef_func
-        self.statistics = coef*torch.ones(ds_len, requires_grad=False).to(dev)
+        self.statistics = coef*torch.ones(ds_len, requires_grad=False).cpu()
         self.pearson_statistics = torch.zeros((ds_len, 6), requires_grad=False).to(dev)
         self.pearson_statistics[:, 0] = 1
         self.count_pearson = torch.zeros((ds_len), dtype=torch.int32, requires_grad=False).to(dev)
-        self.count_statistics = torch.zeros(ds_len, dtype=torch.int32, requires_grad=False).to(dev)
+        self.count_statistics = torch.zeros(ds_len, dtype=torch.int32, requires_grad=False).cpu()
         self.stat_cumsum = torch.cumsum(self.statistics, 0).to(dev)
 
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
@@ -86,7 +87,7 @@ class MyBatchSampler:
         output.scatter_(1, target[:, None], 0)
         output_max = output.max(dim=1)[0]
         corr = 1 + self.pearson_statistics[self.batch, 0]
-        self.statistics[self.batch] = corr * (torch.sigmoid(output_max) - coef2)*coef
+        self.statistics[self.batch] = (corr * (torch.sigmoid(output_max) - coef2)*coef).cpu()
         if self.prev_batch is not None:
             self.pearson_corr(loss/(1e-6 + self.prev_loss), self.prev_batch, self.prev_output)
         self.prev_loss = loss
@@ -94,7 +95,8 @@ class MyBatchSampler:
         self.prev_output = output_max.detach()
 
         self.stat_cumsum = torch.cumsum(self.statistics, 0)
-        self.threshold = torch.topk(self.statistics, k=int(self.ds_len / 10))[0][-1]
+        self.threshold_max = torch.topk(self.statistics, k=int(self.ds_len / 20))[0][-1].detach().cpu().item()
+        self.threshold_min = torch.mean(self.statistics).detach().cpu().item()
         self.count_statistics[self.batch] += 1
 
         self.sum = self.stat_cumsum[self.ds_len - 1]
