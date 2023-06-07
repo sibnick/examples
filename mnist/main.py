@@ -115,6 +115,18 @@ class MnistResNet(ResNet):
         output = F.log_softmax(x, dim=1)
         return output
 
+class MLPSmall(torch.nn.Module):
+    """ Fully connected feed-forward neural network with one hidden layer. """
+    def __init__(self, x_dim, y_dim):
+        super().__init__()
+        self.linear_1 = torch.nn.Linear(x_dim, 32)
+        self.linear_2 = torch.nn.Linear(32, y_dim)
+
+    def forward(self, x):
+        h = F.relu(self.linear_1(torch.flatten(x, start_dim=1)))
+        return F.log_softmax(self.linear_2(h), dim=1)
+
+
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
@@ -233,6 +245,17 @@ def main():
         ])
     dataset1 = MyMnist.MyMnist('../data', train=True, download=True,
                        transform=train_transform, checker=check_transform)
+
+    # train_transform = transforms.Compose([
+    #     #                     transforms.RandomRotation(30),
+    #     transforms.RandomAffine(degrees=20, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+    #     transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize((0.1307,), (0.3081,))
+    # ])
+    # dataset1 = datasets.MNIST('../data', train=True,
+    #                    transform=train_transform)
+
     dataset2 = datasets.MNIST('../data', train=False,
                        transform=transform)
     sampler = mygen.MyBatchSampler(len(dataset1), dev=device, batch_size=args.batch_size, coef=1000, window=3)
@@ -242,7 +265,7 @@ def main():
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
     # model = Net().to(device)
-    model = MnistResNet().to(device)
+    model = MLPSmall(28*28, 10).to(device)
     # optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.1, steps_per_epoch=len(dataset1), epochs=14)
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr) #, weight_decay=1e-6)
