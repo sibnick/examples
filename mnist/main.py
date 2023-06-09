@@ -1,11 +1,37 @@
 from __future__ import print_function
 import argparse
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
+import torch.nn.modules
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
+import torch.nn.init
+
+class InnerNet(nn.Module):
+    def __init__(self, len, emb_size, hidden:int = 128):
+        super(InnerNet, self).__init__()
+        self.embedding = nn.Embedding(len, emb_size)
+        self.fc1 = nn.Linear(emb_size * 2, hidden)
+        self.fc2 = nn.Linear(hidden, hidden, bias=False)
+        self.fc3 = nn.Linear(hidden, 1, bias=False)
+
+    def forward(self, emb_x):
+        #expect x.shape = (64,2,16)
+        x0 = self.embedding(emb_x[:, 0])
+        x1 = self.embedding(emb_x[:, 1])
+        mean_x0 = torch.mean(x0, axis=0)
+        mean_x1 = torch.mean(x1, axis=0)
+        x1 = torch.concat((x1, mean_x1[None, :]))
+        x = torch.concat((x1, mean_x0.repeat(x0.shape[0] + 1, 1)), dim=1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = self.fc3(x)
+        return x
 
 
 class Net(nn.Module):
@@ -17,6 +43,9 @@ class Net(nn.Module):
         self.dropout2 = nn.Dropout(0.5)
         self.fc1 = nn.Linear(9216, 128)
         self.fc2 = nn.Linear(128, 10)
+        self.prev_loss = None
+        self.prev_mean_loss = None
+        self.prev_idx = None
 
     def forward(self, x):
         x = self.conv1(x)
@@ -34,21 +63,60 @@ class Net(nn.Module):
         return output
 
 
-def train(args, model, device, train_loader, optimizer, epoch):
+
+def train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch):
     model.train()
+    imodel.train()
+    imin = 1e+10
+    imax = 0
+    iavg = 0
+    count = 1
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
-        loss = F.nll_loss(output, target)
+        tmp_loss = F.nll_loss(output, target, reduction='none')
+        # topk = torch.argmax(tmp_loss)
+        # tmp_loss[topk] = 0
+        # topk = torch.topk(tmp_loss, k=int(tmp_loss.shape[0]/2), largest=False)
+        # tmp_loss[topk[1]] = 0
+        loss = torch.mean(tmp_loss)
         loss.backward()
         optimizer.step()
+        optimizer.zero_grad()
+
+        prev_loss = model.prev_loss
+        prev_mean_loss = model.prev_mean_loss
+        prev_idx = model.prev_idx
+        model.prev_loss = tmp_loss.detach()
+        model.prev_mean_loss = loss.detach()
+        model.prev_idx = torch.tensor(train_loader.batch_sampler.batch).to(loss.device)
+
+        if prev_loss is not None:
+            x = torch.stack((prev_idx, model.prev_idx), axis=1)
+            iy = imodel(x)
+            yy = model.prev_loss
+            yy = torch.concat((yy, torch.tensor([model.prev_mean_loss], device=device)))
+            loss2 = F.mse_loss(iy.view(-1), yy)
+            loss2.backward()
+            optimizer2.step()
+            tmp = loss2.detach().item()
+            imin = min(imin, tmp)
+            imax = max(imax, tmp)
+            iavg += tmp
+            count += 1
+            optimizer2.zero_grad()
+
+        train_loader.batch_sampler.update_stats(tmp_loss)
+
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item()))
-            if args.dry_run:
-                break
+                       100. * batch_idx / len(train_loader), loss))
+            # if args.dry_run:
+            #     break
+            print("imin: ", imin, " imax: ", imax, " avg: ", iavg/count)
+    print("imin: ", imin, " imax: ", imax, " avg: ", iavg/count)
 
 
 def test(model, device, test_loader):
@@ -125,17 +193,24 @@ def main():
                        transform=transform)
     dataset2 = datasets.MNIST('../data', train=False,
                        transform=transform)
-    train_loader = torch.utils.data.DataLoader(dataset1,**train_kwargs)
+    import mygen
+    sampler = mygen.DynamicWeightBatchSampler(len(dataset1), batch_size=args.batch_size, seed=1)
+    train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler = sampler)
     test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
 
     model = Net().to(device)
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
-
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+
+    emb_size = 16
+    imodel = InnerNet(len(dataset1), emb_size, hidden=128).to(device)
+    optimizer2 = optim.SGD(imodel.parameters(), lr=0.001, momentum=1e-5)
+    #scheduler2 = StepLR(optimizer2, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch)
+        train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)
         test(model, device, test_loader)
         scheduler.step()
+        #scheduler2.step()
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
