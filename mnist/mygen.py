@@ -9,8 +9,9 @@ class WeightRandomSampler(Sampler[int]):
     data_source_len: int
     replacement: bool
 
-    def __init__(self, seed, data_source_len: int) -> None:
+    def __init__(self, seed, data_source_len: int, excluded: int = 0) -> None:
         self.data_source_len = data_source_len
+        self.excluded = excluded
         self.stat_cumsum = None
         self.generator = torch.Generator()
         self.generator.manual_seed(seed)
@@ -20,7 +21,7 @@ class WeightRandomSampler(Sampler[int]):
         return self.data_source_len
 
     def __iter__(self):
-        for idx in range(self.num_samples // self.values.shape[0]):
+        for idx in range((self.num_samples - self.excluded)// self.values.shape[0]):
             yield from torch.searchsorted(self.stat_cumsum, self.values).tolist()
         yield from torch.searchsorted(self.stat_cumsum, self.values).tolist()[:self.num_samples % self.values.shape[0]]
 
@@ -28,7 +29,7 @@ class WeightRandomSampler(Sampler[int]):
         self.stat_cumsum = stat_cumsum
 
     def __len__(self) -> int:
-        return self.data_source_len
+        return self.data_source_len - self.excluded
 
     def next(self, n):
         self.values = (torch.rand(n) * self.stat_cumsum[-1])
@@ -36,10 +37,14 @@ class WeightRandomSampler(Sampler[int]):
         return self
 
 class DynamicWeightBatchSampler:
-    def __init__(self, ds_len: int, batch_size: int, seed: int, initial_coef: float = 1000.0) -> None:
+    def __init__(self, ds_len: int, batch_size: int, seed: int, exclude_ids = [], initial_coef: float = 1000.0) -> None:
         self.ds_len = ds_len
         self.batch = None
         self.statistics = initial_coef * torch.ones(ds_len, requires_grad=False).cpu()
+        self.exclude_ids = numpy.array(exclude_ids)
+        if len(exclude_ids) > 0:
+            print("Exclude len(ids): ", len(exclude_ids))
+            self.statistics[exclude_ids] = -0.0
         self.count_statistics = torch.zeros(ds_len, dtype=torch.int32, requires_grad=False).cpu()
         self.stat_cumsum = torch.cumsum(self.statistics, 0)
 
@@ -48,7 +53,7 @@ class DynamicWeightBatchSampler:
             raise ValueError("batch_size should be a positive integer value, "
                              "but got batch_size={}".format(batch_size))
 
-        self.sampler = WeightRandomSampler(seed, ds_len)
+        self.sampler = WeightRandomSampler(seed, ds_len, len(exclude_ids))
         self.batch_size = batch_size
         self.sampler.update(self.stat_cumsum)
         self.window = 5
@@ -102,9 +107,13 @@ class DynamicWeightBatchSampler:
           try:
               self.sampler.next(self.batch_size)
               self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
+              # if len(self.exclude_ids) > 0:
+              #   intersect = numpy.intersect1d(self.batch, self.exclude_ids)
+              #   if intersect:
+              #         print("Intersection found! ", self.batch, " in ", self.exclude_ids)
               yield self.batch
           except StopIteration:
               break
 
     def __len__(self) -> int:
-      return self.ds_len // self.batch_size
+      return (self.ds_len - len(self.exclude_ids)) // self.batch_size

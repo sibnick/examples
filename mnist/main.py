@@ -2,6 +2,9 @@ from __future__ import print_function
 import argparse
 from collections import OrderedDict
 
+from torch.utils.data import ConcatDataset
+
+import mygen
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,38 +14,8 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 import torch.nn.init
+from sklearn.model_selection import KFold
 
-class InnerNet(nn.Module):
-    def __init__(self, len, emb_size, hidden:int = 128):
-        super(InnerNet, self).__init__()
-        self.emb_size = emb_size
-        self.embedding = nn.Embedding(len, emb_size, max_norm=1, norm_type=2)
-        #self.embedding.weight.data = self.embedding.weight.data / 100
-        self.fc1 = nn.Linear(emb_size * 2, hidden, bias=True)
-        self.fc2 = nn.Linear(hidden, 1, bias=False)
-        self.fc2b = nn.Linear(hidden, int(hidden/2), bias=False)
-        self.bn = nn.BatchNorm1d(int(hidden/2))
-        self.fc3 = nn.Linear(int(hidden/2), 1, bias=False)
-
-    def forward(self, x:tuple):
-        prev_idx, cur_idx, prev_loss = x
-        e = self.embedding(torch.concat((prev_idx, cur_idx)))
-        x0 = e[0 : prev_idx.shape[0]]
-        x1 = e[prev_idx.shape[0] : ]
-
-        x0 = x0 * prev_loss[:, None].repeat((1, self.emb_size))
-        mean_x0 = torch.mean(x0, axis=0)
-        mean_x0 = mean_x0[None, :].repeat((x1.shape[0], 1))
-        x = torch.concat((mean_x0, x1), dim=1)
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.fc2(x)
-        x = F.relu(x)
-        # x = self.fc2b(x)
-        # x = F.relu(x)
-        # x = self.fc3(x)
-        # x = F.relu(x)
-        return x
 
 
 class Net(nn.Module):
@@ -74,16 +47,12 @@ class Net(nn.Module):
         return output
 
 
-
-def train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch):
+def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
-    imodel.train()
-    imin = 1e+10
-    imax = 0
-    iavg = 0
-    count = 1
+    count = 0
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
+        count += target.shape[0]
         optimizer.zero_grad()
         output = model(data)
         tmp_loss = F.nll_loss(output, target, reduction='none')
@@ -95,32 +64,8 @@ def train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoc
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        train_loader.batch_sampler.update_stats(tmp_loss, output.detach().cpu())
-
-        prev_loss = model.prev_loss
-        prev_mean_loss = model.prev_mean_loss
-        prev_idx = model.prev_idx
-        model.prev_loss = tmp_loss.detach()
-        model.prev_mean_loss = loss.detach()
-        model.prev_idx = torch.tensor(train_loader.batch_sampler.batch).detach().to(loss.device)
-
-        if prev_loss is not None:
-            for n in range(1):
-                iy = imodel((prev_idx, model.prev_idx, prev_loss))
-                yy = model.prev_loss
-                loss2 = F.mse_loss(iy.view(-1), yy)
-                loss2.backward()
-                optimizer2.step()
-                tmp = loss2.detach().item()
-                optimizer2.zero_grad()
-            imin = min(imin, tmp)
-            imax = max(imax, tmp)
-            iavg += tmp
-            count += 1
-            if batch_idx % args.log_interval == 0:
-                print("intersect: ", np.intersect1d(yy.topk(k=8, largest=True)[1].cpu(), iy[:, 0].topk(k=8, largest=True)[1].cpu()))
-
-
+        if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler):
+            train_loader.batch_sampler.update_stats(tmp_loss, output.detach().cpu())
 
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -128,14 +73,14 @@ def train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoc
                        100. * batch_idx / len(train_loader), loss))
             # if args.dry_run:
             #     break
-            print("imin: ", imin, " imax: ", imax, " avg: ", iavg/count)
-    print("imin: ", imin, " imax: ", imax, " avg: ", iavg/count)
+    print("Finish epoch. Train items count: ", count)
 
 
 def test(model, device, test_loader):
     model.eval()
     test_loss = 0
     correct = 0
+    count = 0
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
@@ -143,13 +88,23 @@ def test(model, device, test_loader):
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
+            count += target.shape[0]
 
-    test_loss /= len(test_loader.dataset)
+    test_loss /= count
 
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'
+                .format(test_loss, correct, count,  100. * correct / count))
+    return test_loss, 100. * correct / count
 
+def reset_weights(m):
+  '''
+    Try resetting model weights to avoid
+    weight leakage.
+  '''
+  for layer in m.children():
+   if hasattr(layer, 'reset_parameters'):
+    print(f'Reset trainable parameters of layer = {layer}')
+    layer.reset_parameters()
 
 def main():
     # Training settings
@@ -193,41 +148,65 @@ def main():
     test_kwargs = {'batch_size': args.test_batch_size}
     if use_cuda:
         cuda_kwargs = {'num_workers': 1,
-                       'pin_memory': True,
-                       'shuffle': True}
+                       'pin_memory': True
+                       } # , 'shuffle': True}
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    transform=transforms.Compose([
+    transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
         ])
-    dataset1 = datasets.MNIST('../data', train=True, download=True,
-                       transform=transform)
-    dataset2 = datasets.MNIST('../data', train=False,
-                       transform=transform)
-    import mygen
-    sampler = mygen.DynamicWeightBatchSampler(len(dataset1), batch_size=args.batch_size, seed=1)
-    train_loader = torch.utils.data.DataLoader(dataset1, batch_sampler = sampler)
-    test_loader = torch.utils.data.DataLoader(dataset2, **test_kwargs)
+    dataset1 = datasets.MNIST('../data', train=True, download=True, transform=transform)
+    dataset2 = datasets.MNIST('../data', train=False, transform=transform)
+    dataset = ConcatDataset([dataset1, dataset2])
+    # Define the K-fold Cross Validator
+    k_folds = 5
+    kfold = KFold(n_splits=k_folds, shuffle=True)
+    # For fold results
+    results = {}
+    # Start print
+    print('--------------------------------')
 
-    model = Net().to(device)
-    optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
-    scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+    # K-fold Cross Validation model evaluation
+    for fold, (train_ids, test_ids) in enumerate(kfold.split(dataset)):
+        # Print
+        print(f'FOLD {fold}')
+        print('--------------------------------')
+        # Sample elements randomly from a given list of ids, no replacement.
+        train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
+        test_subsampler = torch.utils.data.SubsetRandomSampler(test_ids)
+        sampler = mygen.DynamicWeightBatchSampler(len(dataset), batch_size=args.batch_size, seed=1, exclude_ids=test_ids)
+        train_loader = torch.utils.data.DataLoader(dataset, batch_sampler = sampler)
+        # train_loader = torch.utils.data.DataLoader(dataset, sampler=train_subsampler, **train_kwargs)
+        test_loader = torch.utils.data.DataLoader(dataset, sampler=test_subsampler, **test_kwargs)
+        model = Net().to(device)
+        model.apply(reset_weights)
+        optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
+        scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
 
-    emb_size = 8
-    imodel = InnerNet(len(dataset1), emb_size, hidden=1024).to(device)
-    optimizer2 = optim.Adadelta(imodel.parameters(), lr=0.1)
-    #scheduler2 = StepLR(optimizer2, step_size=1, gamma=args.gamma)
-    for epoch in range(1, args.epochs + 1):
-        train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)
-        test(model, device, test_loader)
-        scheduler.step()
-        #scheduler2.step()
+        for epoch in range(1, args.epochs + 1):
+            train(args, model, device, train_loader, optimizer, epoch)
+            # train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)
+            results[fold] = test(model, device, test_loader)
+            scheduler.step()
+            #scheduler2.step()
 
-    if args.save_model:
-        torch.save(model.state_dict(), "mnist_cnn.pt")
+        if args.save_model:
+            if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler):
+                torch.save(model.state_dict(), "mnist_cnn_weighted_" + str(fold) + ".pt")
+            else: torch.save(model.state_dict(), "mnist_cnn" + str(fold) + ".pt")
 
+    # Print fold results
+    print(f'K-FOLD CROSS VALIDATION RESULTS FOR {k_folds} FOLDS')
+    print('--------------------------------')
+    sum_loss = 0.0
+    sum = 0.0
+    for key, value in results.items():
+        print(f'Fold {key}: {value} %')
+        sum_loss += value[0]
+        sum += value[1]
+    print(f'Average:  {sum_loss/len(results.items())}, {sum/len(results.items())} %')
 
 if __name__ == '__main__':
     main()
