@@ -51,13 +51,50 @@ class DynamicWeightBatchSampler:
         self.sampler = WeightRandomSampler(seed, ds_len)
         self.batch_size = batch_size
         self.sampler.update(self.stat_cumsum)
+        self.window = 5
+        self.prev_batch = None
+        self.prev_loss = None
+        self.prev_output = None
+        self.pearson_statistics = torch.zeros((ds_len, 6), requires_grad=False).cpu()
+        self.pearson_statistics[:, 0] = 1
 
-    def update_stats(self, loss):
+    def update_stats(self, loss, output):
         self.count_statistics[self.batch] += 1
         counts = self.count_statistics[self.batch]
-        self.statistics[self.batch] = loss.cpu() #/ torch.sqrt(counts)
+        loss = loss.cpu()
+        self.statistics[self.batch] = loss #/ torch.sqrt(counts)
         self.stat_cumsum = torch.cumsum(self.statistics, 0)
         self.sampler.update(self.stat_cumsum)
+        output_max = output.max(dim=1)[0]
+        if self.prev_batch is not None:
+            self.pearson_corr(loss/(1e-3 + self.prev_loss), self.prev_batch, self.prev_output)
+        self.prev_loss = loss
+        self.prev_output = output_max.detach()
+        self.prev_batch = self.batch.copy()
+
+    def pearson_corr(self, loss, batch_idx, xn1):
+        n = self.window
+        yn1 = loss
+        n1 = 1.0 / (1 + n)
+        data = self.pearson_statistics[batch_idx]
+        mean_xn1 = data[:, 1] + n1 * (xn1[:] - data[:, 1])
+        mean_yn1 = data[:, 2] + n1 * (yn1 - data[:, 2])
+        nn1 = data[:, 3] + (xn1 - data[:, 1]) * (yn1 - mean_yn1)
+        dn1 = data[:, 4] + (xn1 - data[:, 1]) * (xn1 - mean_xn1)
+        en1 = data[:, 5] + (yn1 - data[:, 2]) * (yn1 - mean_yn1)
+        r = nn1 / (1e-6 + torch.sqrt(1e-6 + dn1 * en1))
+        if (torch.sum(torch.isnan(r)) > 0):
+            r = 1
+            print("!")
+        data = torch.zeros((batch_idx.shape[0], 6), device=self.pearson_statistics.device, requires_grad=False)
+        data[:, 0] = r
+        data[:, 1] = mean_xn1
+        data[:, 2] = mean_yn1
+        data[:, 3] = nn1
+        data[:, 4] = dn1
+        data[:, 5] = en1
+        self.pearson_statistics[batch_idx] = data
+        return r
 
     def __iter__(self):
       sampler_iter = iter(self.sampler)

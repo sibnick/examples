@@ -2,6 +2,7 @@ from __future__ import print_function
 import argparse
 from collections import OrderedDict
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.modules
@@ -14,23 +15,33 @@ import torch.nn.init
 class InnerNet(nn.Module):
     def __init__(self, len, emb_size, hidden:int = 128):
         super(InnerNet, self).__init__()
-        self.embedding = nn.Embedding(len, emb_size)
-        self.fc1 = nn.Linear(emb_size * 2, hidden)
-        self.fc2 = nn.Linear(hidden, hidden, bias=False)
-        self.fc3 = nn.Linear(hidden, 1, bias=False)
+        self.emb_size = emb_size
+        self.embedding = nn.Embedding(len, emb_size, max_norm=1, norm_type=2)
+        #self.embedding.weight.data = self.embedding.weight.data / 100
+        self.fc1 = nn.Linear(emb_size * 2, hidden, bias=True)
+        self.fc2 = nn.Linear(hidden, 1, bias=False)
+        self.fc2b = nn.Linear(hidden, int(hidden/2), bias=False)
+        self.bn = nn.BatchNorm1d(int(hidden/2))
+        self.fc3 = nn.Linear(int(hidden/2), 1, bias=False)
 
-    def forward(self, emb_x):
-        #expect x.shape = (64,2,16)
-        x0 = self.embedding(emb_x[:, 0])
-        x1 = self.embedding(emb_x[:, 1])
+    def forward(self, x:tuple):
+        prev_idx, cur_idx, prev_loss = x
+        e = self.embedding(torch.concat((prev_idx, cur_idx)))
+        x0 = e[0 : prev_idx.shape[0]]
+        x1 = e[prev_idx.shape[0] : ]
+
+        x0 = x0 * prev_loss[:, None].repeat((1, self.emb_size))
         mean_x0 = torch.mean(x0, axis=0)
-        mean_x1 = torch.mean(x1, axis=0)
-        x1 = torch.concat((x1, mean_x1[None, :]))
-        x = torch.concat((x1, mean_x0.repeat(x0.shape[0] + 1, 1)), dim=1)
+        mean_x0 = mean_x0[None, :].repeat((x1.shape[0], 1))
+        x = torch.concat((mean_x0, x1), dim=1)
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)
-        x = self.fc3(x)
+        x = F.relu(x)
+        # x = self.fc2b(x)
+        # x = F.relu(x)
+        # x = self.fc3(x)
+        # x = F.relu(x)
         return x
 
 
@@ -84,30 +95,32 @@ def train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoc
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+        train_loader.batch_sampler.update_stats(tmp_loss, output.detach().cpu())
 
         prev_loss = model.prev_loss
         prev_mean_loss = model.prev_mean_loss
         prev_idx = model.prev_idx
         model.prev_loss = tmp_loss.detach()
         model.prev_mean_loss = loss.detach()
-        model.prev_idx = torch.tensor(train_loader.batch_sampler.batch).to(loss.device)
+        model.prev_idx = torch.tensor(train_loader.batch_sampler.batch).detach().to(loss.device)
 
         if prev_loss is not None:
-            x = torch.stack((prev_idx, model.prev_idx), axis=1)
-            iy = imodel(x)
-            yy = model.prev_loss
-            yy = torch.concat((yy, torch.tensor([model.prev_mean_loss], device=device)))
-            loss2 = F.mse_loss(iy.view(-1), yy)
-            loss2.backward()
-            optimizer2.step()
-            tmp = loss2.detach().item()
+            for n in range(1):
+                iy = imodel((prev_idx, model.prev_idx, prev_loss))
+                yy = model.prev_loss
+                loss2 = F.mse_loss(iy.view(-1), yy)
+                loss2.backward()
+                optimizer2.step()
+                tmp = loss2.detach().item()
+                optimizer2.zero_grad()
             imin = min(imin, tmp)
             imax = max(imax, tmp)
             iavg += tmp
             count += 1
-            optimizer2.zero_grad()
+            if batch_idx % args.log_interval == 0:
+                print("intersect: ", np.intersect1d(yy.topk(k=8, largest=True)[1].cpu(), iy[:, 0].topk(k=8, largest=True)[1].cpu()))
 
-        train_loader.batch_sampler.update_stats(tmp_loss)
+
 
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -202,9 +215,9 @@ def main():
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
 
-    emb_size = 16
-    imodel = InnerNet(len(dataset1), emb_size, hidden=128).to(device)
-    optimizer2 = optim.SGD(imodel.parameters(), lr=0.001, momentum=1e-5)
+    emb_size = 8
+    imodel = InnerNet(len(dataset1), emb_size, hidden=1024).to(device)
+    optimizer2 = optim.Adadelta(imodel.parameters(), lr=0.1)
     #scheduler2 = StepLR(optimizer2, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
         train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)

@@ -1,0 +1,3 @@
+[submodule "mnist/surface"]
+	path = mnist/surface
+	url = git@github.com:sibnick/loss-landscape.git
