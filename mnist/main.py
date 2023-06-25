@@ -1,8 +1,10 @@
 from __future__ import print_function
 import argparse
+import copy
 from collections import OrderedDict
+from functools import partial
 
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, TensorDataset
 
 import mygen
 import numpy as np
@@ -50,6 +52,8 @@ class Net(nn.Module):
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
     count = 0
+    stat = np.zeros((10), dtype=int)
+
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         count += target.shape[0]
@@ -65,9 +69,14 @@ def train(args, model, device, train_loader, optimizer, epoch):
         optimizer.step()
         optimizer.zero_grad()
         if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler):
+            for i in target:
+                stat[i] += 1
             train_loader.batch_sampler.update_stats(tmp_loss, output.detach().cpu())
 
         if batch_idx % args.log_interval == 0:
+            # if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler) and  epoch > 1:
+            #     print("batch stat: ", 100.0 * stat / np.sum(stat))
+
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                        100. * batch_idx / len(train_loader), loss))
@@ -127,11 +136,14 @@ def main():
                         help='quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
+    parser.add_argument('--new-sampler',  action='store_true', default=False,
+                        help='Use new sampler')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False,
                         help='For Saving the current Model')
     args = parser.parse_args()
+    print(args)
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     use_mps = not args.no_mps and torch.backends.mps.is_available()
 
@@ -143,7 +155,7 @@ def main():
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-
+    print("Device: ", device)
     train_kwargs = {'batch_size': args.batch_size}
     test_kwargs = {'batch_size': args.test_batch_size}
     if use_cuda:
@@ -176,10 +188,33 @@ def main():
         # Sample elements randomly from a given list of ids, no replacement.
         train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
         test_subsampler = torch.utils.data.SubsetRandomSampler(test_ids)
-        sampler = mygen.DynamicWeightBatchSampler(len(dataset), batch_size=args.batch_size, seed=1, exclude_ids=test_ids)
-        train_loader = torch.utils.data.DataLoader(dataset, batch_sampler = sampler)
-        # train_loader = torch.utils.data.DataLoader(dataset, sampler=train_subsampler, **train_kwargs)
-        test_loader = torch.utils.data.DataLoader(dataset, sampler=test_subsampler, **test_kwargs)
+        if args.new_sampler:
+            sampler = mygen.DynamicWeightBatchSampler(len(dataset), batch_size=args.batch_size, seed=1, exclude_ids=test_ids)
+            train_loader = torch.utils.data.DataLoader(dataset, batch_sampler=sampler)
+            print("Use new sampler")
+        else:
+            train_loader = torch.utils.data.DataLoader(dataset, sampler=train_subsampler, **train_kwargs)
+            print("Use old sampler")
+
+        train_stat = np.zeros((10), dtype=int)
+        target_ids = []
+        for i in range(10):
+            target_ids.append([])
+        for i in train_ids:
+            target = dataset[i][1]
+            train_stat[target] += 1
+            target_ids[target].append(i)
+        for i in range(10):
+            target_ids[i] = np.array(target_ids[i])
+        if args.new_sampler:
+            sampler.target_ids = target_ids
+
+        test_stat = np.zeros((10), dtype=int)
+        for i in test_ids:
+            test_stat[dataset[i][1]] += 1
+        print("train stat: ", 100.0*train_stat/len(train_ids))
+        print("test stat: ", 100.0*test_stat/len(test_ids))
+        test_loader = torch.utils.data.DataLoader(dataset, sampler=test_subsampler)
         model = Net().to(device)
         model.apply(reset_weights)
         optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
@@ -196,6 +231,7 @@ def main():
             if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler):
                 torch.save(model.state_dict(), "mnist_cnn_weighted_" + str(fold) + ".pt")
             else: torch.save(model.state_dict(), "mnist_cnn" + str(fold) + ".pt")
+        # break
 
     # Print fold results
     print(f'K-FOLD CROSS VALIDATION RESULTS FOR {k_folds} FOLDS')

@@ -1,4 +1,5 @@
 import numpy
+import numpy as np
 import torch
 from torch.utils.data import Sampler
 from typing import Optional
@@ -40,6 +41,7 @@ class DynamicWeightBatchSampler:
     def __init__(self, ds_len: int, batch_size: int, seed: int, exclude_ids = [], initial_coef: float = 1000.0) -> None:
         self.ds_len = ds_len
         self.batch = None
+        self.target_ids = None
         self.statistics = initial_coef * torch.ones(ds_len, requires_grad=False).cpu()
         self.exclude_ids = numpy.array(exclude_ids)
         if len(exclude_ids) > 0:
@@ -68,6 +70,7 @@ class DynamicWeightBatchSampler:
         counts = self.count_statistics[self.batch]
         loss = loss.cpu()
         self.statistics[self.batch] = loss #/ torch.sqrt(counts)
+        self.norm_weights()
         self.stat_cumsum = torch.cumsum(self.statistics, 0)
         self.sampler.update(self.stat_cumsum)
         output_max = output.max(dim=1)[0]
@@ -117,3 +120,16 @@ class DynamicWeightBatchSampler:
 
     def __len__(self) -> int:
       return (self.ds_len - len(self.exclude_ids)) // self.batch_size
+
+    def norm_weights(self):
+        sum = torch.zeros((10), device=self.statistics.device, requires_grad=False)
+        i = 0
+        for cls in self.target_ids:
+            sum[i] = self.statistics[cls].sum()
+            i += 1
+        #print(sum.cpu())
+        avg = sum / sum.mean()
+        i = 0
+        for cls in self.target_ids:
+            self.statistics[cls] /= avg[i]
+            i += 1
