@@ -127,7 +127,7 @@ class DynamicWeightBatchSampler:
       return (self.ds_len - len(self.exclude_ids)) // self.batch_size
 
     def norm_weights(self):
-        sum = torch.zeros((10), device=self.statistics.device, requires_grad=False)
+        sum = torch.zeros((len(self.target_ids)), device=self.statistics.device, requires_grad=False)
         i = 0
         for cls in self.target_ids:
             sum[i] = self.statistics[cls].sum()
@@ -142,4 +142,6 @@ class DynamicWeightBatchSampler:
         for cls in self.target_ids:
             self.statistics[cls] /= avg[i]
             i += 1
-        self.statistics[self.statistics < 1e-6] = 1e-6
+        max_loss = self.statistics.max()
+        min_loss = max_loss / self.ds_len
+        self.statistics[self.statistics < min_loss] = min_loss
