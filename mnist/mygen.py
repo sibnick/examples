@@ -110,6 +110,11 @@ class DynamicWeightBatchSampler:
           try:
               self.sampler.next(self.batch_size)
               self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
+              while np.max(self.batch) >= self.ds_len:
+                  print(self.batch)
+                  print(self.statistics)
+                  print(self.stat_cumsum)
+                  break
               # if len(self.exclude_ids) > 0:
               #   intersect = numpy.intersect1d(self.batch, self.exclude_ids)
               #   if intersect:
@@ -126,10 +131,15 @@ class DynamicWeightBatchSampler:
         i = 0
         for cls in self.target_ids:
             sum[i] = self.statistics[cls].sum()
+            if (sum[i]==0):
+                print("!!ZERO!!! ", i)
+                print(self.statistics[cls])
             i += 1
         #print(sum.cpu())
         avg = sum / sum.mean()
+        avg[avg==0] = 1
         i = 0
         for cls in self.target_ids:
             self.statistics[cls] /= avg[i]
             i += 1
+        self.statistics[self.statistics < 1e-6] = 1e-6
