@@ -5,7 +5,6 @@ from torch.utils.data import Sampler
 from typing import Optional
 
 
-
 class WeightRandomSampler(Sampler[int]):
     data_source_len: int
     replacement: bool
@@ -22,7 +21,7 @@ class WeightRandomSampler(Sampler[int]):
         return self.data_source_len
 
     def __iter__(self):
-        for idx in range((self.num_samples - self.excluded)// self.values.shape[0]):
+        for idx in range((self.num_samples - self.excluded) // self.values.shape[0]):
             yield from torch.searchsorted(self.stat_cumsum, self.values).tolist()
         yield from torch.searchsorted(self.stat_cumsum, self.values).tolist()[:self.num_samples % self.values.shape[0]]
 
@@ -37,8 +36,9 @@ class WeightRandomSampler(Sampler[int]):
         self.n = n
         return self
 
+
 class DynamicWeightBatchSampler:
-    def __init__(self, ds_len: int, batch_size: int, seed: int, exclude_ids = [], initial_coef: float = 1000.0) -> None:
+    def __init__(self, ds_len: int, batch_size: int, seed: int, exclude_ids=[], initial_coef: float = 1000.0) -> None:
         self.ds_len = ds_len
         self.batch = None
         self.target_ids = None
@@ -69,13 +69,13 @@ class DynamicWeightBatchSampler:
         self.count_statistics[self.batch] += 1
         counts = self.count_statistics[self.batch]
         loss = loss.cpu()
-        self.statistics[self.batch] = loss #/ torch.sqrt(counts)
+        self.statistics[self.batch] = loss  # / torch.sqrt(counts)
         self.norm_weights()
         self.stat_cumsum = torch.cumsum(self.statistics, 0)
         self.sampler.update(self.stat_cumsum)
         output_max = output.max(dim=1)[0]
         if self.prev_batch is not None:
-            self.pearson_corr(loss/(1e-3 + self.prev_loss), self.prev_batch, self.prev_output)
+            self.pearson_corr(loss / (1e-3 + self.prev_loss), self.prev_batch, self.prev_output)
         self.prev_loss = loss
         self.prev_output = output_max.detach()
         self.prev_batch = self.batch.copy()
@@ -105,43 +105,46 @@ class DynamicWeightBatchSampler:
         return r
 
     def __iter__(self):
-      sampler_iter = iter(self.sampler)
-      while True:
-          try:
-              self.sampler.next(self.batch_size)
-              self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
-              while np.max(self.batch) >= self.ds_len:
-                  print(self.batch)
-                  print(self.statistics)
-                  print(self.stat_cumsum)
-                  break
-              # if len(self.exclude_ids) > 0:
-              #   intersect = numpy.intersect1d(self.batch, self.exclude_ids)
-              #   if intersect:
-              #         print("Intersection found! ", self.batch, " in ", self.exclude_ids)
-              yield self.batch
-          except StopIteration:
-              break
+        sampler_iter = iter(self.sampler)
+        while True:
+            try:
+                self.sampler.next(self.batch_size)
+                self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
+                while np.max(self.batch) >= self.ds_len:
+                    print(self.batch)
+                    print(self.statistics)
+                    print(self.stat_cumsum)
+                    break
+                if len(self.exclude_ids) > 0:
+                    intersect = numpy.intersect1d(self.batch, self.exclude_ids)
+                    if len(intersect) > 0:
+                        print("Intersection found! ", intersect, " in ", self.exclude_ids)
+                        continue
+                yield self.batch
+            except StopIteration:
+                break
 
     def __len__(self) -> int:
-      return (self.ds_len - len(self.exclude_ids)) // self.batch_size
+        return (self.ds_len - len(self.exclude_ids)) // self.batch_size
 
     def norm_weights(self):
         sum = torch.zeros((len(self.target_ids)), device=self.statistics.device, requires_grad=False)
         i = 0
         for cls in self.target_ids:
             sum[i] = self.statistics[cls].sum()
-            if (sum[i]==0):
+            if (sum[i] == 0):
                 print("!!ZERO!!! ", i)
                 print(self.statistics[cls])
             i += 1
-        #print(sum.cpu())
+        # print(sum.cpu())
         avg = sum / sum.mean()
-        avg[avg==0] = 1
+        avg[avg == 0] = 1
         i = 0
         for cls in self.target_ids:
             self.statistics[cls] /= avg[i]
             i += 1
         max_loss = self.statistics.max()
         min_loss = max_loss / self.ds_len
+        #need not update -0.0 !!!
         self.statistics[self.statistics < min_loss] = min_loss
+        self.statistics[self.exclude_ids] = -0.0
