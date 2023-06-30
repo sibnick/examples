@@ -216,13 +216,15 @@ def run_kfold(args, dataset1, dataset2, device, train_transform, transform, trai
     print('--------------------------------')
     sum_loss = 0.0
     sum = 0.0
+    count = 0
     for key, value in results.items():
         print(f'Fold {key}: {value} %')
         if isinstance(key, str):
             continue
         sum_loss += value[0]
         sum += value[1]
-    print(f'Average:  {sum_loss / len(results.items())}, {sum / len(results.items())} %')
+        count += 1
+    print(f'Average:  {sum_loss / count}, {sum / count} %')
     return results
 
 
