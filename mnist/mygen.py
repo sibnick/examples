@@ -60,7 +60,7 @@ class DynamicWeightBatchSampler:
         self.sampler = WeightRandomSampler(device, seed, ds_len, len(exclude_ids))
         self.batch_size = batch_size
         self.sampler.update(self.stat_cumsum)
-        self.window = 5
+        # self.window = 5
         # self.prev_batch = None
         # self.prev_loss = None
         # self.prev_output = None
@@ -68,12 +68,13 @@ class DynamicWeightBatchSampler:
         # self.pearson_statistics[:, 0] = 1
 
     def update_stats(self, loss, output):
-        self.count_statistics[self.batch] += 1
-        #counts = self.count_statistics[self.batch]
-        self.statistics[self.batch] = loss.to(self.device)  # / torch.sqrt(counts)
-        self.norm_weights()
-        self.stat_cumsum = torch.cumsum(self.statistics, 0)
-        self.sampler.update(self.stat_cumsum)
+        with torch.no_grad():
+            self.count_statistics[self.batch] += 1
+            #counts = self.count_statistics[self.batch]
+            self.statistics[self.batch] = loss.to(self.device)  # / torch.sqrt(counts)
+            self.norm_weights()
+            self.stat_cumsum = torch.cumsum(self.statistics, 0)
+            self.sampler.update(self.stat_cumsum)
         # output_max = output.max(dim=1)[0]
         # if self.prev_batch is not None:
         #     self.pearson_corr(loss / (1e-3 + self.prev_loss), self.prev_batch, self.prev_output)
@@ -109,18 +110,19 @@ class DynamicWeightBatchSampler:
         sampler_iter = iter(self.sampler)
         while True:
             try:
-                self.sampler.next(self.batch_size)
-                self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
-                while np.max(self.batch) >= self.ds_len:
-                    print(self.batch)
-                    print(self.statistics)
-                    print(self.stat_cumsum)
-                    break
-                if len(self.exclude_ids) > 0:
-                    intersect = numpy.intersect1d(self.batch, self.exclude_ids)
-                    if len(intersect) > 0:
-                        print("Intersection found! ", intersect, " in ", self.exclude_ids)
-                        continue
+                with torch.no_grad():
+                    self.sampler.next(self.batch_size)
+                    self.batch = numpy.array([next(sampler_iter) for _ in range(self.batch_size)])
+                    while np.max(self.batch) >= self.ds_len:
+                        print(self.batch)
+                        print(self.statistics)
+                        print(self.stat_cumsum)
+                        break
+                    if len(self.exclude_ids) > 0:
+                        intersect = numpy.intersect1d(self.batch, self.exclude_ids)
+                        if len(intersect) > 0:
+                            print("Intersection found! ", intersect, " in ", self.exclude_ids)
+                            continue
                 yield self.batch
             except StopIteration:
                 break
