@@ -141,7 +141,7 @@ def reset_weights(m):
             # print(f'Reset trainable parameters of layer = {layer}')
             layer.reset_parameters()
 
-def run_kfold(args, dataset1, dataset2, device, train_transform, transform, train_kwargs):
+def run_kfold(args, model, dataset1, dataset2, device, train_transform, transform, train_kwargs):
     k_folds = 5
     dataset = ConcatDataset([dataset1, dataset2])
     kfold = KFold(n_splits=k_folds, shuffle=True)
@@ -158,7 +158,7 @@ def run_kfold(args, dataset1, dataset2, device, train_transform, transform, trai
         train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
         test_subsampler = torch.utils.data.SubsetRandomSampler(test_ids)
         if args.new_sampler:
-            sampler = mygen.DynamicWeightBatchSampler(len(dataset), batch_size=args.batch_size, seed=1,
+            sampler = mygen.DynamicWeightBatchSampler(len(dataset), torch.device("cpu"), batch_size=args.batch_size, seed=1,
                                                       exclude_ids=test_ids)
             train_loader = torch.utils.data.DataLoader(dataset, batch_sampler=sampler)
             print("Use new sampler")
@@ -185,8 +185,6 @@ def run_kfold(args, dataset1, dataset2, device, train_transform, transform, trai
         # print("train stat: ", 100.0*train_stat/len(train_ids))
         # print("test stat: ", 100.0*test_stat/len(test_ids))
         test_loader = torch.utils.data.DataLoader(dataset, sampler=test_subsampler)
-        model = Net().to(device)
-        # model = MnistResNet().to(device)
         model.apply(reset_weights)
         optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
         scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
@@ -253,6 +251,8 @@ def main():
                         help='Use new sampler')
     parser.add_argument('--augmentation',  action='store_true', default=False,
                         help='Use augmentation')
+    parser.add_argument('--model', type=str, default="cnn",
+                        help='One of models: cnn, fc, resnet')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False,
@@ -295,8 +295,18 @@ def main():
 
     # Define the K-fold Cross Validator
     import yaml
-    results = run_kfold(args, dataset1, dataset2, device, train_transform, transform, train_kwargs)
-    print(yaml.dump(results))
+    if args.model == 'resnet':
+        model = MnistResNet().to(device)
+    elif args.model == 'cnn':
+        model = Net().to(device)
+    elif args.model == 'fc':
+        model = MLPSmall(28*28, 10).to(device)
+    else:
+        print("Unsupported model: ", args.model)
+        return
+    print("model: ", args.model)
+    results = run_kfold(args, model, dataset1, dataset2, device, train_transform, transform, train_kwargs)
+    #print(yaml.dump(results))
 
 
 if __name__ == '__main__':
