@@ -285,7 +285,7 @@ def main():
     test_kwargs = {'batch_size': args.test_batch_size}
     if use_cuda:
         cuda_kwargs = {'num_workers': 0,
-                       'pin_memory': True
+                       'pin_memory': False
                        } # , 'shuffle': True}
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
