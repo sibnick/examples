@@ -66,10 +66,10 @@ class MnistResNet(ResNet):
 
 class MLPSmall(torch.nn.Module):
     """ Fully connected feed-forward neural network with one hidden layer. """
-    def __init__(self, x_dim, y_dim):
+    def __init__(self, n_hidden, x_dim, y_dim):
         super().__init__()
-        self.linear_1 = torch.nn.Linear(x_dim, 32)
-        self.linear_2 = torch.nn.Linear(32, y_dim)
+        self.linear_1 = torch.nn.Linear(x_dim, n_hidden)
+        self.linear_2 = torch.nn.Linear(n_hidden, y_dim)
 
     def forward(self, x):
         h = F.relu(self.linear_1(torch.flatten(x, start_dim=1)))
@@ -141,7 +141,12 @@ def reset_weights(m):
             # print(f'Reset trainable parameters of layer = {layer}')
             layer.reset_parameters()
 
-def run_kfold(args, model, dataset1, dataset2, device, train_transform, transform, train_kwargs):
+def run_kfold(args, name, csvfile, model, dataset1, dataset2, device, train_transform, transform, train_kwargs):
+    if csvfile:
+        import csv
+        csvwriter = csv.writer(csvfile, delimiter='\t', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        csvwriter.writerow(["name", "batch_size", "fold", "epoch", "loss", "accuracy"])
+
     k_folds = 5
     dataset = ConcatDataset([dataset1, dataset2])
     kfold = KFold(n_splits=k_folds, shuffle=True)
@@ -150,6 +155,7 @@ def run_kfold(args, model, dataset1, dataset2, device, train_transform, transfor
     # Start print
     print('--------------------------------')
     # K-fold Cross Validation model evaluation
+    sampler_name = ""
     for fold, (train_ids, test_ids) in enumerate(kfold.split(dataset)):
         # Print
         print(f'FOLD {fold}')
@@ -162,9 +168,11 @@ def run_kfold(args, model, dataset1, dataset2, device, train_transform, transfor
                                                       exclude_ids=test_ids)
             train_loader = torch.utils.data.DataLoader(dataset, batch_sampler=sampler)
             print("Use new sampler")
+            sampler_name = "new-sampler"
         else:
             train_loader = torch.utils.data.DataLoader(dataset, sampler=train_subsampler, **train_kwargs)
             print("Use old sampler")
+            sampler_name = "old-sampler"
 
         train_stat = np.zeros((10), dtype=int)
         target_ids = []
@@ -199,7 +207,9 @@ def run_kfold(args, model, dataset1, dataset2, device, train_transform, transfor
             # train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)
             epoch_result = test(model, device, test_loader)
             results[fold] = epoch_result
-            results[str(fold) + "-" + str(epoch)] = epoch_result
+            if csvfile:
+                csvwriter.writerow([name + "_" + sampler_name, args.batch_size, fold, epoch, epoch_result[0], epoch_result[1]])
+                csvfile.flush()
             scheduler.step()
             # scheduler2.step()
 
@@ -217,8 +227,6 @@ def run_kfold(args, model, dataset1, dataset2, device, train_transform, transfor
     count = 0
     for key, value in results.items():
         print(f'Fold {key}: {value} %')
-        if isinstance(key, str):
-            continue
         sum_loss += value[0]
         sum += value[1]
         count += 1
@@ -247,12 +255,16 @@ def main():
                         help='quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
+    parser.add_argument('--model-params', type=int, default=None, metavar='S',
+                        help='model params (n-hidden for fs')
     parser.add_argument('--new-sampler',  action='store_true', default=False,
                         help='Use new sampler')
     parser.add_argument('--augmentation',  action='store_true', default=False,
                         help='Use augmentation')
     parser.add_argument('--model', type=str, default="cnn",
                         help='One of models: cnn, fc, resnet')
+    parser.add_argument('--csv', type=str, default=None,
+                        help='CSV file to print results in format: model,fold,epoch,loss,accuracy')
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=False,
@@ -283,13 +295,13 @@ def main():
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
-        ])
+    ])
     train_transform = transforms.Compose([
         transforms.RandomAffine(degrees=20, translate=(0.1, 0.1), scale=(0.9, 1.1)),
         transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
-        ])
+    ])
     dataset1 = datasets.MNIST('../data', train=True, download=True, transform=transform)
     dataset2 = datasets.MNIST('../data', train=False, transform=transform)
 
@@ -300,12 +312,19 @@ def main():
     elif args.model == 'cnn':
         model = Net().to(device)
     elif args.model == 'fc':
-        model = MLPSmall(28*28, 10).to(device)
+        model = MLPSmall(args.model_params, 28*28, 10).to(device)
     else:
         print("Unsupported model: ", args.model)
         return
-    print("model: ", args.model)
-    results = run_kfold(args, model, dataset1, dataset2, device, train_transform, transform, train_kwargs)
+    name = args.model
+    if args.model_params:
+        name = args.model + "-" + str(args.model_params)
+    print("model: ", name)
+    if args.csv:
+        with open(args.csv, 'w', newline='') as csvfile:
+            run_kfold(args, name, csvfile, model, dataset1, dataset2, device, train_transform, transform, train_kwargs)
+    else:
+        run_kfold(args, name, None, model, dataset1, dataset2, device, train_transform, transform, train_kwargs)
     #print(yaml.dump(results))
 
 
