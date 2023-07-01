@@ -141,14 +141,14 @@ def reset_weights(m):
             # print(f'Reset trainable parameters of layer = {layer}')
             layer.reset_parameters()
 
-def run_kfold(args, name, csvfile, model, dataset1, dataset2, device, train_transform, transform, train_kwargs):
+def run_kfold(args, name, csvfile, model, dataset, device, train_transform, train_kwargs):
     if csvfile:
         import csv
         csvwriter = csv.writer(csvfile, delimiter='\t', quotechar='|', quoting=csv.QUOTE_MINIMAL)
         csvwriter.writerow(["name", "batch_size", "fold", "epoch", "loss", "accuracy"])
 
     k_folds = 5
-    dataset = ConcatDataset([dataset1, dataset2])
+
     kfold = KFold(n_splits=k_folds, shuffle=True)
     # For fold results
     results = {}
@@ -198,11 +198,9 @@ def run_kfold(args, name, csvfile, model, dataset1, dataset2, device, train_tran
         scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
         for epoch in range(1, args.epochs + 1):
             if args.augmentation:
-                dataset1.transforms = train_transform
-                dataset2.transforms = train_transform
+                dataset.transforms = train_transform
             train(args, model, device, train_loader, optimizer, epoch)
-            dataset1.transforms = transform
-            dataset2.transforms = transform
+            dataset.transforms = None
 
             # train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)
             epoch_result = test(model, device, test_loader)
@@ -304,7 +302,13 @@ def main():
     ])
     dataset1 = datasets.MNIST('../data', train=True, download=True, transform=transform)
     dataset2 = datasets.MNIST('../data', train=False, transform=transform)
-
+    _dataset = ConcatDataset([dataset1, dataset2])
+    inputs = torch.zeros((len(_dataset), 1, 28, 28))
+    targets = torch.zeros((len(_dataset)), dtype=int)
+    for idx, (input, target) in enumerate(_dataset):
+        inputs[idx] = input
+        targets[idx] = target
+    dataset = TensorDataset(inputs.to(device), targets.to(device))
     # Define the K-fold Cross Validator
     import yaml
     if args.model == 'resnet':
@@ -322,9 +326,9 @@ def main():
     print("model: ", name)
     if args.csv:
         with open(args.csv, 'w', newline='') as csvfile:
-            run_kfold(args, name, csvfile, model, dataset1, dataset2, device, train_transform, transform, train_kwargs)
+            run_kfold(args, name, csvfile, model, dataset, device, train_transform, train_kwargs)
     else:
-        run_kfold(args, name, None, model, dataset1, dataset2, device, train_transform, transform, train_kwargs)
+        run_kfold(args, name, None, model, dataset, device, train_transform, train_kwargs)
     #print(yaml.dump(results))
 
 
