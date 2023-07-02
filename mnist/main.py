@@ -95,8 +95,8 @@ def train(args, model, device, train_loader, optimizer, epoch):
         optimizer.step()
         optimizer.zero_grad()
         if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler):
-            for i in target:
-                stat[i] += 1
+            # for i in target:
+            #     stat[i] += 1
             train_loader.batch_sampler.update_stats(tmp_loss, output.detach().cpu())
 
         if batch_idx % args.log_interval == 0:

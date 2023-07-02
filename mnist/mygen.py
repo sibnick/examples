@@ -71,6 +71,9 @@ class DynamicWeightBatchSampler:
         with torch.no_grad():
             self.count_statistics[self.batch] += 1
             #counts = self.count_statistics[self.batch]
+            med = torch.median(loss)
+            huge_loss = loss > med
+            loss[huge_loss] = med
             self.statistics[self.batch] = loss.to(self.device)  # / torch.sqrt(counts)
             self.norm_weights()
             self.stat_cumsum = torch.cumsum(self.statistics, 0)
