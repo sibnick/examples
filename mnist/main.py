@@ -141,95 +141,104 @@ def reset_weights(m):
             # print(f'Reset trainable parameters of layer = {layer}')
             layer.reset_parameters()
 
-def run_kfold(args, name, csvfile, model, dataset, device, train_transform, train_kwargs):
-    if csvfile:
+def run_kfold(args, name, csv_name, model, dataset, device, train_transform, train_kwargs):
+    count_csv_name = csv_name[:-4] + "_count.csv"
+    if csv_name == "/dev/null":
+        count_csv_name = csv_name
+    with open(csv_name, 'w', newline='') as csvfile, open(count_csv_name, 'w', newline='') as count_csvfile:
         import csv
         csvwriter = csv.writer(csvfile, delimiter='\t', quotechar='|', quoting=csv.QUOTE_MINIMAL)
         csvwriter.writerow(["name", "batch_size", "fold", "epoch", "loss", "accuracy"])
+        count_csvwriter = csv.writer(count_csvfile, delimiter='\t', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        count_csvwriter.writerow(["idx", "target", "count", "fold"])
 
-    k_folds = 5
+        k_folds = 5
 
-    kfold = KFold(n_splits=k_folds, shuffle=True)
-    # For fold results
-    results = {}
-    # Start print
-    print('--------------------------------')
-    # K-fold Cross Validation model evaluation
-    sampler_name = ""
-    for fold, (train_ids, test_ids) in enumerate(kfold.split(dataset)):
-        # Print
-        print(f'FOLD {fold}')
+        kfold = KFold(n_splits=k_folds, shuffle=True)
+        # For fold results
+        results = {}
+        # Start print
         print('--------------------------------')
-        # Sample elements randomly from a given list of ids, no replacement.
-        train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
-        test_subsampler = torch.utils.data.SubsetRandomSampler(test_ids)
-        if args.new_sampler:
-            sampler = mygen.DynamicWeightBatchSampler(len(dataset), torch.device("cpu"), batch_size=args.batch_size, seed=1,
-                                                      exclude_ids=test_ids)
-            train_loader = torch.utils.data.DataLoader(dataset, batch_sampler=sampler)
-            print("Use new sampler")
-            sampler_name = "new-sampler"
-        else:
-            train_loader = torch.utils.data.DataLoader(dataset, sampler=train_subsampler, **train_kwargs)
-            print("Use old sampler")
-            sampler_name = "old-sampler"
-
-        train_stat = np.zeros((10), dtype=int)
-        target_ids = []
-        for i in range(10):
-            target_ids.append([])
-        for i in train_ids:
-            target = dataset[i][1]
-            train_stat[target] += 1
-            target_ids[target].append(i)
-        for i in range(10):
-            target_ids[i] = np.array(target_ids[i])
-        if args.new_sampler:
-            sampler.target_ids = target_ids
-
-        # test_stat = np.zeros((10), dtype=int)
-        # for i in test_ids:
-        #     test_stat[dataset[i][1]] += 1
-        # print("train stat: ", 100.0*train_stat/len(train_ids))
-        # print("test stat: ", 100.0*test_stat/len(test_ids))
-        test_loader = torch.utils.data.DataLoader(dataset, sampler=test_subsampler)
-        model.apply(reset_weights)
-        optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
-        scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
-        for epoch in range(1, args.epochs + 1):
-            if args.augmentation:
-                dataset.transforms = train_transform
-            train(args, model, device, train_loader, optimizer, epoch)
-            dataset.transforms = None
-
-            # train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)
-            epoch_result = test(model, device, test_loader)
-            results[fold] = epoch_result
-            if csvfile:
-                csvwriter.writerow([name + "_" + sampler_name, args.batch_size, fold, epoch, epoch_result[0], epoch_result[1]])
-                csvfile.flush()
-            scheduler.step()
-            # scheduler2.step()
-
-        if args.save_model:
-            if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler):
-                torch.save(model.state_dict(), "mnist_cnn_weighted_" + str(fold) + ".pt")
+        # K-fold Cross Validation model evaluation
+        sampler_name = ""
+        for fold, (train_ids, test_ids) in enumerate(kfold.split(dataset)):
+            # Print
+            print(f'FOLD {fold}')
+            print('--------------------------------')
+            # Sample elements randomly from a given list of ids, no replacement.
+            train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
+            test_subsampler = torch.utils.data.SubsetRandomSampler(test_ids)
+            if args.new_sampler:
+                sampler = mygen.DynamicWeightBatchSampler(len(dataset), torch.device("cpu"), batch_size=args.batch_size, seed=1,
+                                                          exclude_ids=test_ids)
+                train_loader = torch.utils.data.DataLoader(dataset, batch_sampler=sampler)
+                print("Use new sampler")
+                sampler_name = "new-sampler"
             else:
-                torch.save(model.state_dict(), "mnist_cnn" + str(fold) + ".pt")
-        # break
-    # Print fold results
-    print(f'K-FOLD CROSS VALIDATION RESULTS FOR {k_folds} FOLDS')
-    print('--------------------------------')
-    sum_loss = 0.0
-    sum = 0.0
-    count = 0
-    for key, value in results.items():
-        print(f'Fold {key}: {value} %')
-        sum_loss += value[0]
-        sum += value[1]
-        count += 1
-    print(f'Average:  {sum_loss / count}, {sum / count} %')
-    return results
+                train_loader = torch.utils.data.DataLoader(dataset, sampler=train_subsampler, **train_kwargs)
+                print("Use old sampler")
+                sampler_name = "old-sampler"
+
+            train_stat = np.zeros((10), dtype=int)
+            target_ids = []
+            for i in range(10):
+                target_ids.append([])
+            for i in train_ids:
+                target = dataset[i][1]
+                train_stat[target] += 1
+                target_ids[target].append(i)
+            for i in range(10):
+                target_ids[i] = np.array(target_ids[i])
+            if args.new_sampler:
+                sampler.target_ids = target_ids
+
+            # test_stat = np.zeros((10), dtype=int)
+            # for i in test_ids:
+            #     test_stat[dataset[i][1]] += 1
+            # print("train stat: ", 100.0*train_stat/len(train_ids))
+            # print("test stat: ", 100.0*test_stat/len(test_ids))
+            test_loader = torch.utils.data.DataLoader(dataset, sampler=test_subsampler)
+            model.apply(reset_weights)
+            optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
+            scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+            for epoch in range(1, args.epochs + 1):
+                if args.augmentation:
+                    dataset.transforms = train_transform
+                train(args, model, device, train_loader, optimizer, epoch)
+                dataset.transforms = None
+
+                # train(args, model, imodel, device, train_loader, optimizer, optimizer2, epoch)
+                epoch_result = test(model, device, test_loader)
+                results[fold] = epoch_result
+                if csvfile:
+                    csvwriter.writerow([name + "_" + sampler_name, args.batch_size, fold, epoch, epoch_result[0], epoch_result[1]])
+                    csvfile.flush()
+                scheduler.step()
+                # scheduler2.step()
+
+            if args.save_model:
+                if isinstance(train_loader.batch_sampler, mygen.DynamicWeightBatchSampler):
+                    torch.save(model.state_dict(), "mnist_cnn_weighted_" + str(fold) + ".pt")
+                else:
+                    torch.save(model.state_dict(), "mnist_cnn" + str(fold) + ".pt")
+            if args.new_sampler:
+                targets = dataset.tensors[1].cpu().numpy()
+                stats = sampler.count_statistics.cpu().numpy()
+                for idx in  range(stats.shape[0]):
+                    count_csvwriter.writerow([idx, targets[idx], stats[idx], fold])
+        # Print fold results
+        print(f'K-FOLD CROSS VALIDATION RESULTS FOR {k_folds} FOLDS')
+        print('--------------------------------')
+        sum_loss = 0.0
+        sum = 0.0
+        count = 0
+        for key, value in results.items():
+            print(f'Fold {key}: {value} %')
+            sum_loss += value[0]
+            sum += value[1]
+            count += 1
+        print(f'Average:  {sum_loss / count}, {sum / count} %')
+        return results
 
 
 def main():
@@ -253,7 +262,7 @@ def main():
                         help='quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--model-params', type=int, default=None, metavar='S',
+    parser.add_argument('--model-params', type=int, default=512, metavar='S',
                         help='model params (n-hidden for fs')
     parser.add_argument('--new-sampler',  action='store_true', default=False,
                         help='Use new sampler')
@@ -325,11 +334,11 @@ def main():
         name = args.model + "-" + str(args.model_params)
     print("model: ", name)
     if args.csv:
-        with open(args.csv, 'w', newline='') as csvfile:
-            run_kfold(args, name, csvfile, model, dataset, device, train_transform, train_kwargs)
+        fname = args.csv
     else:
-        run_kfold(args, name, None, model, dataset, device, train_transform, train_kwargs)
-    #print(yaml.dump(results))
+        fname = "/dev/null"
+
+    run_kfold(args, name, fname, model, dataset, device, train_transform, train_kwargs)
 
 
 if __name__ == '__main__':

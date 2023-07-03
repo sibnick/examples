@@ -39,10 +39,11 @@ class WeightRandomSampler(Sampler[int]):
 
 
 class DynamicWeightBatchSampler:
-    def __init__(self, ds_len: int, device, batch_size: int, seed: int, exclude_ids=[], initial_coef: float = 1000.0) -> None:
+    def __init__(self, ds_len: int, device, batch_size: int, seed: int, exclude_ids=[], suppress_strategy = "mean+median", initial_coef: float = 1000.0) -> None:
         self.ds_len = ds_len
         self.device = device
         self.batch = None
+        self.suppress_strategy =suppress_strategy
         self.target_ids = None
         self.statistics = initial_coef * torch.ones(ds_len, requires_grad=False, device=device)
         self.exclude_ids = numpy.array(exclude_ids)
@@ -71,9 +72,20 @@ class DynamicWeightBatchSampler:
         with torch.no_grad():
             self.count_statistics[self.batch] += 1
             #counts = self.count_statistics[self.batch]
-            med = torch.median(loss)
-            huge_loss = loss > med # or just loss > med ???
-            loss[huge_loss] = 0
+            if self.suppress_strategy == 'mean+median':
+                med = torch.median(loss)
+                mean = torch.mean(loss)
+                huge_loss = loss > (mean + med)
+                loss[huge_loss] = 0
+            elif self.suppress_strategy == 'mean':
+                mean = torch.mean(loss)
+                huge_loss = loss > mean
+                loss[huge_loss] = 0
+            elif self.suppress_strategy == 'median':
+                med = torch.median(loss)
+                huge_loss = loss > med
+                loss[huge_loss] = 0
+
             self.statistics[self.batch] = loss.to(self.device)  # / torch.sqrt(counts)
             self.norm_weights()
             self.stat_cumsum = torch.cumsum(self.statistics, 0)
