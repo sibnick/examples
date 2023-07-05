@@ -161,8 +161,7 @@ class DynamicWeightBatchSampler:
         for cls in self.target_ids:
             self.statistics[cls] /= avg[i]
             i += 1
-        max_loss = self.statistics.max()
-        min_loss = max_loss / self.ds_len
+        min_loss = self.statistics.mean() / self.ds_len
         #need not update -0.0 !!!
         self.statistics[self.statistics < min_loss] = min_loss
         self.statistics[self.exclude_ids] = -0.0
